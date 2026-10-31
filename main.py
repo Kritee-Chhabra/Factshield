@@ -52,6 +52,7 @@ class TextRequest(BaseModel):
     """Request body for the /analyze endpoint."""
 
     text: str
+    sarvam_api_key: str | None = None
 
     @field_validator("text")
     @classmethod
@@ -80,7 +81,7 @@ async def analyze(request: TextRequest):
     Analyse submitted text for hallucinations, bias, and unverified claims.
     """
     try:
-        result = analyze_text(request.text)
+        result = analyze_text(request.text, sarvam_api_key=request.sarvam_api_key)
         return result
     except Exception as exc:  # pragma: no cover
         raise HTTPException(

@@ -8,7 +8,7 @@ This guide shows how to share FactShield with anyone on the web.
 
 FactShield is currently being tunneled to a public HTTPS URL:
 
-* **Public Web Link**: [https://factshield-auditor.loca.lt](https://factshield-auditor.loca.lt)
+* **Public Web Link**: [https://factshield-audit.loca.lt](https://factshield-audit.loca.lt)
 * **First-Time Password**: `219.65.47.110`  
   *(Localtunnel displays a one-time anti-abuse prompt on first visit; simply enter the IP address above and click "Click to Submit" to view the app).*
 

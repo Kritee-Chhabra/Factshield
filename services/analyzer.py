@@ -1,74 +1,72 @@
 """
 services/analyzer.py
 
-Core analysis engine for the FactShield AI Auditor.
-Heuristically evaluates text claims for hallucinations, bias,
-emotional manipulation, unverified statistics, and fact-checking signals.
+Heuristic text analysis engine for FactShield.
+Evaluates submitted text across 6 dimensions:
+  1. Fact Checking (verifies claims using citations, language signals, and domain sources)
+  2. Hallucination Detection (identifies absolute certainty, fabrications, and vague authority)
+  3. Bias Detection (detects slanted rhetoric, one-sided arguments, and loaded language)
+  4. Emotional Manipulation (detects sensationalist, alarming, or fear-inducing triggers)
+  5. Statistics Verification (flags unverified percentages and numbers without citations)
+  6. Trust Score (synthesizes a multi-dimensional credibility score from 0 to 100)
 """
 
 import re
+import logging
+from services.sarvam_client import analyze_with_sarvam, get_sarvam_api_key
+
+logger = logging.getLogger("factshield.analyzer")
 
 # ---------------------------------------------------------------------------
-# Keyword dictionaries for heuristic analysis
+# Dictionaries & Regex Patterns
 # ---------------------------------------------------------------------------
 
 ABSOLUTE_CLAIM_WORDS = {
-    "always", "never", "everyone", "nobody", "all", "none",
-    "every", "impossible", "guaranteed", "proven", "definitive",
-    "certain", "absolutely", "undeniably", "unquestionably",
-    "without doubt", "100%", "perfect", "flawless", "infallible",
-    "inevitable", "invariably", "unconditionally",
-}
-
-EMOTIONAL_TRIGGER_WORDS = {
-    "shocking", "outrageous", "horrifying", "unbelievable", "incredible",
-    "terrifying", "devastating", "explosive", "scandalous", "alarming",
-    "catastrophic", "disastrous", "urgent", "crisis", "danger",
-    "miracle", "revolutionary", "secret", "exposed", "conspiracy",
-    "warning", "must-see", "breaking", "exclusive", "bombshell",
-}
-
-BIAS_INDICATOR_WORDS = {
-    "obviously", "clearly", "everyone knows", "it's obvious",
-    "of course", "naturally", "simply", "just", "merely",
-    "only", "radical", "extreme", "agenda", "propaganda",
-    "brainwashed", "naive", "foolish", "ridiculous",
+    "always", "never", "definitely", "undoubtedly", "proven", "guaranteed",
+    "impossible", "unquestionably", "indisputable", "certainly", "100%",
+    "unconditionally", "infallible", "undeniable", "absolute", "completely",
 }
 
 HALLUCINATION_WORDS = {
-    "scientists say", "experts agree", "studies show", "research proves",
-    "it is known", "it is a fact", "undisputed", "universally accepted",
-    "according to science", "doctors confirm", "governments admit",
+    "experts agree", "everyone knows", "studies show", "research proves",
+    "scientists have found", "widely known", "without doubt", "it is obvious",
+    "conclusively proven", "unanimously accepted", "it is common knowledge",
 }
 
-# Regex patterns
+EMOTIONAL_TRIGGER_WORDS = {
+    "shocking", "devastating", "miracle", "catastrophic", "terrifying",
+    "horrific", "unbelievable", "nightmare", "disastrous", "apocalyptic",
+    "mind-blowing", "jaw-dropping", "sensational", "panic", "agony",
+    "ruin", "destroy", "horrifying", "frightening", "deadly",
+}
+
+BIAS_INDICATOR_WORDS = {
+    "obviously", "clearly", "naturally", "as expected", "of course",
+    "needless to say", "undeniably", "plainly", "predictably", "unquestionably",
+    "patently", "morally superior", "corrupt", "malicious", "evil",
+}
+
 STAT_PATTERN = re.compile(
-    r"""
-    \b\d+(?:\.\d+)?%          # percentage like 45% or 3.5%
-    |\b\d{1,3}(?:,\d{3})+\b  # large numbers like 1,000,000
-    |\b\d+\s*(?:million|billion|trillion|thousand)\b  # written-out numbers
-    |\b(?:study|studies|research|survey|poll|data|statistics?)\s+
-      (?:show(?:s|ed)?|found|reveal(?:s|ed)?|indicate(?:s|d)?|suggest(?:s|ed)?) # study shows
-    """,
-    re.IGNORECASE | re.VERBOSE,
+    r"\b(?:\d+(?:\.\d+)?%|\$\d+(?:\.\d+)?(?:\s*(?:billion|million|trillion))?|\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:percent|times|fold|people|users|patients|cases))\b",
+    re.IGNORECASE,
 )
 
 CITATION_PATTERN = re.compile(
-    r"""
-    \b(?:according\s+to|source[s]?:|cited\s+by|published\s+in|
-        as\s+reported\s+by|researchers?\s+at|scientists?\s+at|
-        university\s+of|journal\s+of|doi:|arxiv:|pubmed:)
-    """,
-    re.IGNORECASE | re.VERBOSE,
+    r"\b(?:according to|published in|cited by|reported by|peer-reviewed|journal of|"
+    r"nature|lancet|reuters|who|cdc|nasa|iea|associated press|bbc|nih|world bank|"
+    r"stanford|mit|harvard|oxford|university of|et al\.)\b",
+    re.IGNORECASE,
 )
 
 FACT_CHECK_POSITIVE = re.compile(
-    r"\b(?:confirmed|verified|true|correct|accurate|validated|authenticated|established)\b",
+    r"\b(?:confirmed|verified|documented|corroborated|authenticated|peer-reviewed|"
+    r"official data|established by|substantiated)\b",
     re.IGNORECASE,
 )
 
 FACT_CHECK_NEGATIVE = re.compile(
-    r"\b(?:false|incorrect|debunked|misleading|inaccurate|disputed|disproven|unfounded)\b",
+    r"\b(?:false|incorrect|debunked|misleading|inaccurate|disputed|disproven|"
+    r"unfounded|myth|hoax|conspiracy|rumor)\b",
     re.IGNORECASE,
 )
 
@@ -128,7 +126,7 @@ def _fact_check_signal(text: str) -> str:
 def _sentence_confidence(claim: str) -> float:
     """Return a 0.0–1.0 confidence score for an individual claim."""
     tokens = _tokenize_lower(claim)
-    score = 0.75  # neutral baseline
+    score = 0.85  # neutral confident baseline
 
     # Penalties
     if _has_absolute_claim(tokens, claim):
@@ -139,82 +137,82 @@ def _sentence_confidence(claim: str) -> float:
         score -= 0.08 * min(_count_bias_words(tokens), 3)
     if _has_stat(claim) and not _has_citation(claim):
         score -= 0.20
-    if _has_hallucination_phrase(claim):
-        score -= 0.15
+    if _has_hallucination_phrase(claim) and not _has_citation(claim):
+        score -= 0.25
+    if FACT_CHECK_NEGATIVE.search(claim):
+        score -= 0.40
 
-    # Bonuses
+    # Boosts
     if _has_citation(claim):
-        score += 0.20
+        score += 0.15
     if FACT_CHECK_POSITIVE.search(claim):
-        score += 0.05
-    if len(claim.split()) >= 12:
-        score += 0.05
+        score += 0.10
 
-    return round(max(0.0, min(1.0, score)), 2)
+    return round(max(0.10, min(1.0, score)), 2)
 
 
 def _classify_claim(claim: str, confidence: float) -> tuple:
     """
-    Return (status, reason, flags) based on claim content and confidence.
-    flags is a list of detection categories that fired on this claim.
+    Classify a claim and return (status, reason, flags).
+    Guarantees consistent mapping between status and flags.
     """
     tokens = _tokenize_lower(claim)
+    reasons = []
+    flags = []
+
     has_abs = _has_absolute_claim(tokens, claim)
+    has_hallucination = _has_hallucination_phrase(claim) and not _has_citation(claim)
     has_stat = _has_stat(claim)
     has_cite = _has_citation(claim)
     emo_count = _count_emotional_words(tokens)
     bias_count = _count_bias_words(tokens)
-    has_hallucination = _has_hallucination_phrase(claim)
     fact_signal = _fact_check_signal(claim)
 
-    reasons = []
-    flags = []
-
-    # ── Hallucination check
+    # 1. Hallucination checks
     if has_abs:
-        reasons.append("Contains absolute language that may signal a hallucinated claim.")
+        reasons.append("Contains absolute or extreme certainty assertions typical of fabricated text.")
         flags.append("hallucination")
     if has_hallucination:
-        reasons.append("Uses vague authority references typical of hallucinated content.")
+        reasons.append("Cites vague authority ('everyone knows', 'studies show') without a named citation.")
         if "hallucination" not in flags:
             flags.append("hallucination")
 
-    # ── Statistics check
+    # 2. Statistics check
     if has_stat and not has_cite:
-        reasons.append("Statistical claim without a verifiable source citation.")
+        reasons.append("Statistical metrics or percentages presented without a verifiable source.")
         flags.append("unverified_stat")
 
-    # ── Emotional manipulation check
+    # 3. Emotional manipulation check
     if emo_count > 0:
-        reasons.append(f"Uses {emo_count} emotionally charged word(s) that may manipulate perception.")
+        reasons.append(f"Uses {emo_count} emotionally charged or sensationalist trigger word(s).")
         flags.append("emotional")
 
-    # ── Bias check
+    # 4. Bias check
     if bias_count > 0:
         reasons.append(f"Contains {bias_count} bias indicator(s) suggesting one-sided framing.")
         flags.append("bias")
 
-    # ── Fact-check signals
-    if fact_signal == "positive":
-        reasons.append("Includes credible citation or verified language — adds trustworthiness.")
-        flags.append("fact_verified")
-    elif fact_signal == "negative":
-        reasons.append("Contains language indicating a debunked or false claim.")
+    # 5. Fact check check
+    if fact_signal == "negative":
+        reasons.append("Contains language identifying a debunked, disproven, or false assertion.")
         flags.append("fact_debunked")
+    elif has_cite or fact_signal == "positive":
+        reasons.append("Includes verified source citation or documented evidence.")
+        flags.append("fact_verified")
 
-    # ── Determine overall status
-    if has_abs or has_hallucination or fact_signal == "negative":
+    # 6. Overall Status Determination
+    if has_abs or has_hallucination or fact_signal == "negative" or confidence < 0.45:
         status = "Flagged"
-    elif has_stat and not has_cite:
-        status = "Unverified"
-    elif confidence >= 0.70:
-        status = "Verified"
-    elif confidence >= 0.45:
+        if not flags:
+            flags.append("hallucination")
+    elif (has_stat and not has_cite) or (0.45 <= confidence < 0.75):
         status = "Unverified"
     else:
-        status = "Flagged"
+        status = "Verified"
+        if "fact_verified" not in flags:
+            flags.append("fact_verified")
 
-    reason = " ".join(reasons) if reasons else "No major issues detected; accepted as a standard factual statement."
+    reason = " ".join(reasons) if reasons else "Logical assertion supported by standard factual tone."
     return status, reason, flags
 
 
@@ -222,16 +220,9 @@ def _classify_claim(claim: str, confidence: float) -> tuple:
 # Public API
 # ---------------------------------------------------------------------------
 
-def analyze_text(text: str) -> dict:
+def analyze_text(text: str, sarvam_api_key: str = None) -> dict:
     """
-    Analyze input text for hallucinations, bias, emotional manipulation,
-    unverified statistics, and fact-check signals.
-
-    Returns
-    -------
-    dict
-        Structured audit result with overall_trust_score, summary,
-        claims list (with per-claim flags), and detailed metrics.
+    Analyze input text across all 6 FactShield dimensions.
     """
     stripped = text.strip()
     if not stripped:
@@ -240,31 +231,59 @@ def analyze_text(text: str) -> dict:
             "summary": "No text provided for analysis.",
             "claims": [],
             "metrics": {
-                "fact_check": {"verified_count": 0, "debunked_count": 0, "neutral_count": 0},
-                "hallucination_count": 0,
-                "bias_detected": False,
-                "bias_count": 0,
-                "emotional_manipulation_score": 0.0,
-                "emotional_count": 0,
-                "unverified_stats_count": 0,
+                "fact_check": {"verified_count": 0, "debunked_count": 0, "neutral_count": 0, "score": 0.0},
+                "hallucination": {"count": 0, "score": 100.0, "risk": "Clean"},
+                "bias": {"detected": False, "count": 0, "score": 100.0, "level": "Neutral"},
+                "emotional": {"score": 0.0, "count": 0, "intensity": "Calm"},
+                "statistics": {"unverified_count": 0, "score": 100.0, "status": "Clean"},
                 "total_claims": 0,
             },
+            "scores": {
+                "trust": 0.0,
+                "fact_checking": 0.0,
+                "hallucination": 100.0,
+                "bias": 100.0,
+                "emotional": 0.0,
+                "statistics": 100.0,
+            },
+            "engine": {"name": "Heuristic Engine", "model": "local", "credits_used": False},
         }
 
-    # ── Split into sentences / claims ────────────────────────────────────────
+    # ── Attempt Sarvam AI LLM Analysis if Key is Available ──────────────────
+    active_key = get_sarvam_api_key(sarvam_api_key)
+    if active_key:
+        try:
+            sarvam_result = analyze_with_sarvam(stripped, active_key)
+            if sarvam_result and isinstance(sarvam_result, dict) and "overall_trust_score" in sarvam_result:
+                # Ensure scores block exists for multi-button navigation
+                if "scores" not in sarvam_result:
+                    m = sarvam_result.get("metrics", {})
+                    tot = max(len(sarvam_result.get("claims", [])), 1)
+                    sarvam_result["scores"] = {
+                        "trust": sarvam_result["overall_trust_score"],
+                        "fact_checking": round(min(100.0, (m.get("fact_check", {}).get("verified_count", 0) / tot) * 100), 1),
+                        "hallucination": round(max(0.0, 100 - (m.get("hallucination_count", 0) / tot) * 100), 1),
+                        "bias": round(max(0.0, 100 - (m.get("bias_count", 0) / tot) * 50), 1),
+                        "emotional": m.get("emotional_manipulation_score", 0.0),
+                        "statistics": round(max(0.0, 100 - (m.get("unverified_stats_count", 0) / tot) * 100), 1),
+                    }
+                return sarvam_result
+        except Exception as exc:
+            logger.warning(f"Sarvam AI API failed: {exc}. Falling back to heuristic engine.")
+
+    # ── Built-in Heuristic Analysis ─────────────────────────────────────────
     raw_claims = re.split(r"(?<=[.?!])\s+", stripped)
     raw_claims = [c.strip() for c in raw_claims if c.strip()]
+    if not raw_claims:
+        raw_claims = [stripped]
 
-    # ── Evaluate each claim ───────────────────────────────────────────────────
     claims = []
     all_confidences = []
     total_emotional = 0
-    unverified_stats = 0
     bias_word_total = 0
     hallucination_count = 0
-    fact_verified_count = 0
-    fact_debunked_count = 0
-    fact_neutral_count = 0
+    unverified_stats = 0
+    debunked_count = 0
 
     for idx, claim_text in enumerate(raw_claims, start=1):
         tokens = _tokenize_lower(claim_text)
@@ -279,12 +298,8 @@ def analyze_text(text: str) -> dict:
             hallucination_count += 1
         if "unverified_stat" in flags:
             unverified_stats += 1
-        if "fact_verified" in flags:
-            fact_verified_count += 1
-        elif "fact_debunked" in flags:
-            fact_debunked_count += 1
-        else:
-            fact_neutral_count += 1
+        if "fact_debunked" in flags:
+            debunked_count += 1
 
         claims.append({
             "id": idx,
@@ -295,40 +310,47 @@ def analyze_text(text: str) -> dict:
             "flags": flags,
         })
 
-    # ── Aggregate metrics ─────────────────────────────────────────────────────
-    avg_confidence = sum(all_confidences) / len(all_confidences) if all_confidences else 0.0
-
-    flagged_count = sum(1 for c in claims if c["status"] == "Flagged")
-    unverified_count = sum(1 for c in claims if c["status"] == "Unverified")
     total = len(claims)
-
-    penalty = (flagged_count * 0.15 + unverified_count * 0.07) / max(total, 1)
-    raw_score = avg_confidence - penalty
-    overall_trust_score = round(max(0.0, min(1.0, raw_score)) * 100, 1)
-
-    # Emotional manipulation score (0–100)
-    emo_max = total * 3
-    emotional_score = round(min(total_emotional / max(emo_max, 1), 1.0) * 100, 1)
-
-    bias_detected = bias_word_total > 0
-
-    # ── Build summary ─────────────────────────────────────────────────────────
-    if overall_trust_score >= 80:
-        verdict = "High trust. The text appears largely factual with minimal red flags."
-    elif overall_trust_score >= 55:
-        verdict = "Moderate trust. Some claims require independent verification."
-    elif overall_trust_score >= 30:
-        verdict = "Low trust. Multiple unverified or emotionally biased claims detected."
-    else:
-        verdict = "Very low trust. The text contains significant hallucination or bias indicators."
-
     verified_count = sum(1 for c in claims if c["status"] == "Verified")
+    unverified_count = sum(1 for c in claims if c["status"] == "Unverified")
+    flagged_count = sum(1 for c in claims if c["status"] == "Flagged")
+
+    # ── Calculate Multi-Dimensional Scores ──────────────────────────────────
+    # 1. Fact Checking Score (0 - 100)
+    fact_score = round(max(0.0, min(100.0, (verified_count / max(total, 1)) * 100)), 1)
+    if debunked_count > 0:
+        fact_score = round(max(0.0, fact_score - (debunked_count / total) * 40), 1)
+
+    # 2. Hallucination Cleanliness Score (100 = completely clean, 0 = severe hallucination)
+    hallucination_score = round(max(0.0, 100.0 - (hallucination_count / max(total, 1)) * 100), 1)
+
+    # 3. Bias Neutrality Score (100 = completely neutral, 0 = severe bias)
+    bias_score = round(max(0.0, 100.0 - (bias_word_total / max(total * 2, 1)) * 100), 1)
+
+    # 4. Emotional Manipulation Score (0 = calm/objective, 100 = high manipulation)
+    emotional_score = round(min((total_emotional / max(total * 2, 1)) * 100, 100.0), 1)
+
+    # 5. Statistics Reliability Score (100 = all cited, 0 = unverified stats)
+    stat_score = 100.0 if unverified_stats == 0 else round(max(0.0, 100.0 - (unverified_stats / max(total, 1)) * 100), 1)
+
+    # 6. Overall Trust Score (Harmonized Composite)
+    avg_conf = (sum(all_confidences) / len(all_confidences)) if all_confidences else 0.5
+    composite = (avg_conf * 0.40) + ((fact_score / 100) * 0.25) + ((hallucination_score / 100) * 0.20) + ((bias_score / 100) * 0.15)
+    penalty = (flagged_count * 0.12 + unverified_count * 0.05) / max(total, 1)
+    raw_trust = max(0.05, min(1.0, composite - penalty))
+    overall_trust_score = round(raw_trust * 100, 1)
+
+    # ── Build Verdict and Summary ───────────────────────────────────────────
+    if overall_trust_score >= 75:
+        verdict = "High trust. The content demonstrates sound factual integrity with minimal risk."
+    elif overall_trust_score >= 45:
+        verdict = "Moderate trust. Some assertions require independent verification."
+    else:
+        verdict = "Low trust. Multiple unverified, biased, or hallucinated claims detected."
+
     summary = (
-        f"{verdict} "
-        f"Analysed {total} claim(s): "
-        f"{verified_count} verified, "
-        f"{unverified_count} unverified, "
-        f"{flagged_count} flagged."
+        f"{verdict} Analysed {total} claim(s): "
+        f"{verified_count} verified, {unverified_count} unverified, {flagged_count} flagged."
     )
 
     return {
@@ -337,16 +359,45 @@ def analyze_text(text: str) -> dict:
         "claims": claims,
         "metrics": {
             "fact_check": {
-                "verified_count": fact_verified_count,
-                "debunked_count": fact_debunked_count,
-                "neutral_count": fact_neutral_count,
+                "verified_count": verified_count,
+                "debunked_count": debunked_count,
+                "neutral_count": max(0, total - verified_count - debunked_count),
+                "score": fact_score,
             },
-            "hallucination_count": hallucination_count,
-            "bias_detected": bias_detected,
-            "bias_count": bias_word_total,
-            "emotional_manipulation_score": emotional_score,
-            "emotional_count": total_emotional,
-            "unverified_stats_count": unverified_stats,
+            "hallucination": {
+                "count": hallucination_count,
+                "score": hallucination_score,
+                "risk": "Severe" if hallucination_score < 40 else "Caution" if hallucination_score < 75 else "Clean",
+            },
+            "bias": {
+                "detected": bias_word_total > 0,
+                "count": bias_word_total,
+                "score": bias_score,
+                "level": "Heavily Biased" if bias_score < 50 else "Slightly Slanted" if bias_score < 85 else "Neutral",
+            },
+            "emotional": {
+                "score": emotional_score,
+                "count": total_emotional,
+                "intensity": "High Manipulation" if emotional_score > 50 else "Moderate Urgency" if emotional_score > 20 else "Calm / Objective",
+            },
+            "statistics": {
+                "unverified_count": unverified_stats,
+                "score": stat_score,
+                "status": "Unverified Statistics" if unverified_stats > 0 else "All Cited",
+            },
             "total_claims": total,
+        },
+        "scores": {
+            "trust": overall_trust_score,
+            "fact_checking": fact_score,
+            "hallucination": hallucination_score,
+            "bias": bias_score,
+            "emotional": emotional_score,
+            "statistics": stat_score,
+        },
+        "engine": {
+            "name": "Heuristic Engine",
+            "model": "local",
+            "credits_used": False,
         },
     }

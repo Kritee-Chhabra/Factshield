@@ -6,7 +6,7 @@
 
 ## 🌐 Live Web Demo
 
-* **Live Demo URL**: [https://factshield-auditor.loca.lt](https://factshield-auditor.loca.lt)
+* **Live Demo URL**: [https://factshield-audit.loca.lt](https://factshield-audit.loca.lt)
 * **First-Time Password**: `219.65.47.110`  
   *(Localtunnel displays a one-time anti-abuse prompt on your first visit from a new device; paste the IP above and click **"Click to Submit"** to enter the app).*
 

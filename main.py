@@ -1,12 +1,16 @@
 """
 main.py
 
-Entry point for the AI Hallucination & Bias Auditor API.
-Run with:  uvicorn main:app --reload
+Entry point for the FactShield AI Hallucination & Bias Auditor Web Application & API.
+Run locally with:   uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+Or in production:   python main.py
 """
 
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 
 from services.analyzer import analyze_text
@@ -16,24 +20,24 @@ from services.analyzer import analyze_text
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="AI Hallucination Auditor API",
+    title="FactShield — AI Hallucination & Bias Auditor",
     description=(
-        "Analyses AI-generated (or any) text for hallucinations, bias, "
-        "emotional manipulation, and unverified statistical claims. "
-        "Returns a preliminary Trust Score alongside per-claim breakdowns."
+        "Analyses AI-generated text for hallucinations, bias, "
+        "emotional manipulation, and unverified statistics. "
+        "Returns a comprehensive Trust Score alongside per-claim breakdowns."
     ),
     version="1.0.0",
-    docs_url="/docs",       # Swagger UI  →  http://127.0.0.1:8000/docs
-    redoc_url="/redoc",     # ReDoc UI    →  http://127.0.0.1:8000/redoc
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
 # ---------------------------------------------------------------------------
-# CORS – allow all origins so the React frontend can connect seamlessly
+# CORS – allows all origins for public web and API access
 # ---------------------------------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten to your frontend domain in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -52,7 +56,6 @@ class TextRequest(BaseModel):
     @field_validator("text")
     @classmethod
     def text_must_not_be_only_whitespace(cls, v: str) -> str:
-        # Allow empty string — the analyzer handles it gracefully
         return v
 
 
@@ -61,16 +64,13 @@ class HealthResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# API Routes
 # ---------------------------------------------------------------------------
 
 
-@app.get("/", response_model=HealthResponse, tags=["Health"])
-async def health_check():
-    """
-    Simple health-check endpoint.
-    Returns 200 + {"status": "active"} when the server is running.
-    """
+@app.get("/api/health", response_model=HealthResponse, tags=["Health"])
+async def api_health():
+    """Health check endpoint for cloud monitoring and load balancers."""
     return {"status": "active"}
 
 
@@ -78,37 +78,6 @@ async def health_check():
 async def analyze(request: TextRequest):
     """
     Analyse submitted text for hallucinations, bias, and unverified claims.
-
-    ### What it does
-    - Splits the input into individual sentence-level claims.
-    - Heuristically checks each claim for:
-      - **Absolute language** (always, never, guaranteed …)
-      - **Unverified statistics** (numbers / percentages without citations)
-      - **Emotional manipulation** (shocking, catastrophic …)
-      - **Bias indicators** (obviously, everyone knows …)
-    - Aggregates a preliminary **Trust Score** (0 – 100).
-
-    ### Returns
-    ```json
-    {
-      "overall_trust_score": 72.5,
-      "summary": "Moderate trust …",
-      "claims": [
-        {
-          "id": 1,
-          "claim_text": "...",
-          "status": "Verified | Unverified | Flagged",
-          "confidence": 0.75,
-          "reason": "..."
-        }
-      ],
-      "metrics": {
-        "bias_detected": false,
-        "emotional_manipulation_score": 10.0,
-        "unverified_stats_count": 1
-      }
-    }
-    ```
     """
     try:
         result = analyze_text(request.text)
@@ -121,30 +90,52 @@ async def analyze(request: TextRequest):
 
 
 # ---------------------------------------------------------------------------
-# Dev entry-point (python main.py)
+# Static Web Hosting (Serves React frontend on the web)
+# ---------------------------------------------------------------------------
+
+FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+
+if os.path.exists(FRONTEND_DIST):
+    # Mount assets folder for built JS/CSS
+    assets_dir = os.path.join(FRONTEND_DIST, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    # Serve index.html on root
+    @app.get("/", tags=["Web App"])
+    async def serve_index():
+        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+
+    # Fallback for client-side routing and static files (favicon, etc.)
+    @app.get("/{full_path:path}", tags=["Web App"])
+    async def serve_spa(full_path: str):
+        file_path = os.path.join(FRONTEND_DIST, full_path)
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+else:
+    @app.get("/", response_model=HealthResponse, tags=["Health"])
+    async def root_fallback():
+        return {"status": "active", "note": "Frontend not built yet. Run npm run build inside frontend/"}
+
+
+# ---------------------------------------------------------------------------
+# Web Entry Point (Runs on port specified by cloud provider or default 8000)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
 
+    port = int(os.environ.get("PORT", 8000))
+    host = os.environ.get("HOST", "0.0.0.0")
+
     print("\n" + "=" * 60)
-    print("  AI Hallucination & Bias Auditor API")
+    print(f"  FactShield Web Application & API is running on http://{host}:{port}")
     print("=" * 60)
-    print("  Swagger docs : http://127.0.0.1:8000/docs")
-    print("  ReDoc        : http://127.0.0.1:8000/redoc")
-    print("  Health check : GET  http://127.0.0.1:8000/")
-    print("  Analyze      : POST http://127.0.0.1:8000/analyze")
-    print("=" * 60)
-    print("\n  Sample request payload:")
-    print(
-        """
-  POST http://127.0.0.1:8000/analyze
-  Content-Type: application/json
+    print(f"  Web Interface : http://localhost:{port}")
+    print(f"  Swagger Docs  : http://localhost:{port}/docs")
+    print(f"  ReDoc Docs    : http://localhost:{port}/redoc")
+    print(f"  Health Check  : http://localhost:{port}/api/health")
+    print("=" * 60 + "\n")
 
-  {
-    "text": "Scientists have always known that vaccines cause autism. Studies show 95% of children are affected. According to WHO, this claim is completely false and unverified."
-  }
-    """
-    )
-
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("main:app", host=host, port=port, reload=False)

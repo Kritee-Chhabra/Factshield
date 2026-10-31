@@ -1,0 +1,459 @@
+[
+  {
+    "text": "According to the World Health Organization, regular physical activity reduces the risk of cardiovascular disease. However, viral internet posts claim that drinking boiled garlic water instantly cures all respiratory viral infections, which has been debunked as false by medical institutions.",
+    "expected": {
+      "claims": [
+        {
+          "claim_text": "According to the World Health Organization, regular physical activity reduces the risk of cardiovascular disease.",
+          "status": "Verified",
+          "confidence": 1.0,
+          "flags": [
+            "fact_verified"
+          ],
+          "dimensions": {
+            "fact_check": "verified",
+            "hallucination": "clean",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "clean"
+          }
+        },
+        {
+          "claim_text": "However, viral internet posts claim that drinking boiled garlic water instantly cures all respiratory viral infections, which has been debunked as false by medical institutions.",
+          "status": "Flagged",
+          "confidence": 0.45,
+          "flags": [
+            "fact_debunked"
+          ],
+          "dimensions": {
+            "fact_check": "debunked",
+            "hallucination": "flagged",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "clean"
+          }
+        }
+      ],
+      "scores": {
+        "trust": 65.5,
+        "fact_checking": 30.0,
+        "hallucination": 100.0,
+        "bias": 100.0,
+        "emotional": 0.0,
+        "statistics": 100.0
+      }
+    }
+  },
+  {
+    "text": "Scientists have always known with 100% certainty that every human brain will be connected to neural supercomputers before 2026. Everyone knows that this breakthrough is guaranteed to cure all human mortality without doubt.",
+    "expected": {
+      "claims": [
+        {
+          "claim_text": "Scientists have always known with 100% certainty that every human brain will be connected to neural supercomputers before 2026.",
+          "status": "Flagged",
+          "confidence": 0.35,
+          "flags": [
+            "hallucination",
+            "unverified_stat"
+          ],
+          "dimensions": {
+            "fact_check": "unverified",
+            "hallucination": "flagged",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "unverified"
+          }
+        },
+        {
+          "claim_text": "Everyone knows that this breakthrough is guaranteed to cure all human mortality without doubt.",
+          "status": "Flagged",
+          "confidence": 0.3,
+          "flags": [
+            "hallucination"
+          ],
+          "dimensions": {
+            "fact_check": "unverified",
+            "hallucination": "flagged",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "clean"
+          }
+        }
+      ],
+      "scores": {
+        "trust": 16.0,
+        "fact_checking": 0.0,
+        "hallucination": 0.0,
+        "bias": 100.0,
+        "emotional": 0.0,
+        "statistics": 50.0
+      }
+    }
+  },
+  {
+    "text": "Clearly, open-source technology is morally superior in every single aspect, whereas proprietary companies are universally corrupt, predatory, and completely malicious toward human civilization.",
+    "expected": {
+      "claims": [
+        {
+          "claim_text": "Clearly, open-source technology is morally superior in every single aspect, whereas proprietary companies are universally corrupt, predatory, and completely malicious toward human civilization.",
+          "status": "Flagged",
+          "confidence": 0.31,
+          "flags": [
+            "hallucination",
+            "bias"
+          ],
+          "dimensions": {
+            "fact_check": "unverified",
+            "hallucination": "flagged",
+            "bias": "flagged",
+            "emotional": "clean",
+            "statistics": "clean"
+          }
+        }
+      ],
+      "scores": {
+        "trust": 5.0,
+        "fact_checking": 0.0,
+        "hallucination": 0.0,
+        "bias": 0.0,
+        "emotional": 0.0,
+        "statistics": 100.0
+      }
+    }
+  },
+  {
+    "text": "You must panic immediately before terrifying disasters and horrifying conspiracies destroy your family and plunge everyone into devastating agony forever!",
+    "expected": {
+      "claims": [
+        {
+          "claim_text": "You must panic immediately before terrifying disasters and horrifying conspiracies destroy your family and plunge everyone into devastating agony forever!",
+          "status": "Unverified",
+          "confidence": 0.55,
+          "flags": [
+            "emotional"
+          ],
+          "dimensions": {
+            "fact_check": "unverified",
+            "hallucination": "clean",
+            "bias": "clean",
+            "emotional": "flagged",
+            "statistics": "clean"
+          }
+        }
+      ],
+      "scores": {
+        "trust": 52.0,
+        "fact_checking": 0.0,
+        "hallucination": 100.0,
+        "bias": 100.0,
+        "emotional": 100.0,
+        "statistics": 100.0
+      }
+    }
+  },
+  {
+    "text": "Over 96.8% of modern artificial intelligence outputs are proven to lose $840 billion in enterprise value, and 78% of remote workers suffer catastrophic memory loss.",
+    "expected": {
+      "claims": [
+        {
+          "claim_text": "Over 96.8% of modern artificial intelligence outputs are proven to lose $840 billion in enterprise value, and 78% of remote workers suffer catastrophic memory loss.",
+          "status": "Flagged",
+          "confidence": 0.25,
+          "flags": [
+            "hallucination",
+            "unverified_stat",
+            "emotional"
+          ],
+          "dimensions": {
+            "fact_check": "unverified",
+            "hallucination": "flagged",
+            "bias": "clean",
+            "emotional": "flagged",
+            "statistics": "unverified"
+          }
+        }
+      ],
+      "scores": {
+        "trust": 13.0,
+        "fact_checking": 0.0,
+        "hallucination": 0.0,
+        "bias": 100.0,
+        "emotional": 50.0,
+        "statistics": 0.0
+      }
+    }
+  },
+  {
+    "text": "According to peer-reviewed research published in Nature, solar photovoltaic efficiency improved by 12.4% between 2018 and 2024. The International Energy Agency notes that renewable adoption grew steadily across 35 countries.",
+    "expected": {
+      "claims": [
+        {
+          "claim_text": "According to peer-reviewed research published in Nature, solar photovoltaic efficiency improved by 12.4% between 2018 and 2024.",
+          "status": "Verified",
+          "confidence": 1.0,
+          "flags": [
+            "fact_verified"
+          ],
+          "dimensions": {
+            "fact_check": "verified",
+            "hallucination": "clean",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "cited"
+          }
+        },
+        {
+          "claim_text": "The International Energy Agency notes that renewable adoption grew steadily across 35 countries.",
+          "status": "Verified",
+          "confidence": 1.0,
+          "flags": [
+            "fact_verified"
+          ],
+          "dimensions": {
+            "fact_check": "verified",
+            "hallucination": "clean",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "clean"
+          }
+        }
+      ],
+      "scores": {
+        "trust": 100.0,
+        "fact_checking": 100.0,
+        "hallucination": 100.0,
+        "bias": 100.0,
+        "emotional": 0.0,
+        "statistics": 100.0
+      }
+    }
+  },
+  {
+    "text": "People who exercise regularly tend to sleep better.",
+    "expected": {
+      "claims": [
+        {
+          "claim_text": "People who exercise regularly tend to sleep better.",
+          "status": "Verified",
+          "confidence": 0.85,
+          "flags": [
+            "fact_verified"
+          ],
+          "dimensions": {
+            "fact_check": "verified",
+            "hallucination": "clean",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "clean"
+          }
+        }
+      ],
+      "scores": {
+        "trust": 94.0,
+        "fact_checking": 100.0,
+        "hallucination": 100.0,
+        "bias": 100.0,
+        "emotional": 0.0,
+        "statistics": 100.0
+      }
+    }
+  },
+  {
+    "text": "- First point. Second point!\n2) Third point",
+    "expected": {
+      "claims": [
+        {
+          "claim_text": "First point.",
+          "status": "Verified",
+          "confidence": 0.85,
+          "flags": [
+            "fact_verified"
+          ],
+          "dimensions": {
+            "fact_check": "verified",
+            "hallucination": "clean",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "clean"
+          }
+        },
+        {
+          "claim_text": "Second point!",
+          "status": "Verified",
+          "confidence": 0.85,
+          "flags": [
+            "fact_verified"
+          ],
+          "dimensions": {
+            "fact_check": "verified",
+            "hallucination": "clean",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "clean"
+          }
+        },
+        {
+          "claim_text": "Third point",
+          "status": "Verified",
+          "confidence": 0.85,
+          "flags": [
+            "fact_verified"
+          ],
+          "dimensions": {
+            "fact_check": "verified",
+            "hallucination": "clean",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "clean"
+          }
+        }
+      ],
+      "scores": {
+        "trust": 94.0,
+        "fact_checking": 100.0,
+        "hallucination": 100.0,
+        "bias": 100.0,
+        "emotional": 0.0,
+        "statistics": 100.0
+      }
+    }
+  },
+  {
+    "text": "This is mind-blowing! Needless to say, it's 100% safe.",
+    "expected": {
+      "claims": [
+        {
+          "claim_text": "This is mind-blowing!",
+          "status": "Verified",
+          "confidence": 0.75,
+          "flags": [
+            "emotional",
+            "fact_verified"
+          ],
+          "dimensions": {
+            "fact_check": "verified",
+            "hallucination": "clean",
+            "bias": "clean",
+            "emotional": "flagged",
+            "statistics": "clean"
+          }
+        },
+        {
+          "claim_text": "Needless to say, it's 100% safe.",
+          "status": "Flagged",
+          "confidence": 0.27,
+          "flags": [
+            "hallucination",
+            "unverified_stat",
+            "bias"
+          ],
+          "dimensions": {
+            "fact_check": "unverified",
+            "hallucination": "flagged",
+            "bias": "flagged",
+            "emotional": "clean",
+            "statistics": "unverified"
+          }
+        }
+      ],
+      "scores": {
+        "trust": 48.2,
+        "fact_checking": 50.0,
+        "hallucination": 50.0,
+        "bias": 75.0,
+        "emotional": 25.0,
+        "statistics": 50.0
+      }
+    }
+  },
+  {
+    "text": "Smith et al. reported that 3,000 patients improved.",
+    "expected": {
+      "claims": [
+        {
+          "claim_text": "Smith et al. reported that 3,000 patients improved.",
+          "status": "Verified",
+          "confidence": 1.0,
+          "flags": [
+            "fact_verified"
+          ],
+          "dimensions": {
+            "fact_check": "verified",
+            "hallucination": "clean",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "cited"
+          }
+        }
+      ],
+      "scores": {
+        "trust": 100.0,
+        "fact_checking": 100.0,
+        "hallucination": 100.0,
+        "bias": 100.0,
+        "emotional": 0.0,
+        "statistics": 100.0
+      }
+    }
+  },
+  {
+    "text": "The rumor is false and has been debunked.",
+    "expected": {
+      "claims": [
+        {
+          "claim_text": "The rumor is false and has been debunked.",
+          "status": "Flagged",
+          "confidence": 0.45,
+          "flags": [
+            "fact_debunked"
+          ],
+          "dimensions": {
+            "fact_check": "debunked",
+            "hallucination": "flagged",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "clean"
+          }
+        }
+      ],
+      "scores": {
+        "trust": 41.0,
+        "fact_checking": 0.0,
+        "hallucination": 100.0,
+        "bias": 100.0,
+        "emotional": 0.0,
+        "statistics": 100.0
+      }
+    }
+  },
+  {
+    "text": "It is human nature to worry about the future.",
+    "expected": {
+      "claims": [
+        {
+          "claim_text": "It is human nature to worry about the future.",
+          "status": "Verified",
+          "confidence": 0.85,
+          "flags": [
+            "fact_verified"
+          ],
+          "dimensions": {
+            "fact_check": "verified",
+            "hallucination": "clean",
+            "bias": "clean",
+            "emotional": "clean",
+            "statistics": "clean"
+          }
+        }
+      ],
+      "scores": {
+        "trust": 94.0,
+        "fact_checking": 100.0,
+        "hallucination": 100.0,
+        "bias": 100.0,
+        "emotional": 0.0,
+        "statistics": 100.0
+      }
+    }
+  }
+]

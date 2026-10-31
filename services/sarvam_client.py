@@ -15,8 +15,9 @@ import urllib.request
 
 logger = logging.getLogger("factshield.sarvam")
 
-SARVAM_API_URL = "https://api.sarvam.ai/v1/chat/completions"
-DEFAULT_MODEL = "sarvam-105b"
+SARVAM_API_URL = os.environ.get("SARVAM_API_URL", "https://api.sarvam.ai/v1/chat/completions")
+DEFAULT_MODEL = os.environ.get("SARVAM_MODEL", "sarvam-105b")
+REQUEST_TIMEOUT_SECONDS = float(os.environ.get("SARVAM_TIMEOUT", "30"))
 
 SYSTEM_PROMPT = """You are FactShield, an authoritative AI Hallucination & Bias Auditor.
 Analyze the user's text for truthfulness, hallucinations, bias, emotional manipulation, and statistics verification.
@@ -83,27 +84,40 @@ def get_sarvam_api_key(override_key: str = None) -> str:
     return ""
 
 
-def analyze_with_sarvam(text: str, api_key: str = None) -> dict:
+def _extract_json_object(content: str) -> dict:
     """
-    Perform deep LLM audit using Sarvam AI (sarvam-105b).
-
-    Parameters
-    ----------
-    text : str
-        Text to audit.
-    api_key : str, optional
-        Sarvam AI API key/token. If None, reads from env.
-
-    Returns
-    -------
-    dict
-        Structured audit report matching FactShield schema,
-        or None if API call fails.
+    Parse the JSON object out of a model reply. Tolerates markdown code fences
+    and leading/trailing prose around the object.
     """
-    key = get_sarvam_api_key(api_key)
-    if not key:
-        logger.info("No Sarvam API key found. Skipping Sarvam AI analysis.")
-        return None
+    content = content.strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.IGNORECASE)
+        content = re.sub(r"\s*```$", "", content)
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        start, end = content.find("{"), content.rfind("}")
+        if start == -1 or end <= start:
+            raise ValueError("Sarvam AI reply did not contain a JSON object")
+        parsed = json.loads(content[start:end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("Sarvam AI reply was not a JSON object")
+    return parsed
+
+
+def analyze_with_sarvam(text: str, api_key: str) -> tuple[dict, dict]:
+    """
+    Perform a deep LLM audit using Sarvam AI.
+
+    Returns ``(raw_report, engine_metadata)``. The raw report follows the looser
+    schema in SYSTEM_PROMPT and must be passed through
+    ``services.analyzer.normalize_llm_report`` before being returned to clients.
+
+    Raises on missing key, network/HTTP failure, or an unparseable reply so the
+    caller can fall back to the heuristic engine.
+    """
+    if not api_key:
+        raise ValueError("No Sarvam API key provided")
 
     payload = {
         "model": DEFAULT_MODEL,
@@ -117,46 +131,32 @@ def analyze_with_sarvam(text: str, api_key: str = None) -> dict:
         "temperature": 0.1,
     }
 
-    req_data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(SARVAM_API_URL, data=req_data, method="POST")
-
+    req = urllib.request.Request(
+        SARVAM_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+    )
     # Pass both Authorization and api-subscription-key for broad Sarvam gateway support
     req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {key}")
-    req.add_header("api-subscription-key", key)
+    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("api-subscription-key", api_key)
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw_response = resp.read().decode("utf-8")
-            data = json.loads(raw_response)
-
-            # Extract message content from OpenAI-compatible response format
-            content = data["choices"][0]["message"]["content"].strip()
-
-            # Clean markdown code blocks if the model wrapped it in ```json ... ```
-            if content.startswith("```"):
-                content = re.sub(r"^```(?:json)?\s*", "", content)
-                content = re.sub(r"\s*```$", "", content)
-
-            audit_result = json.loads(content)
-
-            # Ensure engine metadata tag is included
-            audit_result["engine"] = {
-                "name": "Sarvam AI",
-                "model": DEFAULT_MODEL,
-                "credits_used": True,
-            }
-            return audit_result
-
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         error_body = ""
         try:
-            error_body = e.read().decode("utf-8")
+            error_body = e.read().decode("utf-8", errors="replace")[:500]
         except Exception:
             pass
-        logger.error(f"Sarvam AI API HTTP {e.code}: {e.reason} - {error_body}")
-        raise ValueError(f"Sarvam AI Error ({e.code}): {error_body or e.reason}")
+        logger.error("Sarvam AI API HTTP %s: %s - %s", e.code, e.reason, error_body)
+        raise ValueError(f"Sarvam AI Error ({e.code}): {error_body or e.reason}") from e
 
-    except Exception as e:
-        logger.error(f"Failed to analyze with Sarvam AI: {str(e)}")
-        raise e
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ValueError("Unexpected Sarvam AI response format") from e
+
+    engine = {"name": "Sarvam AI", "model": data.get("model") or DEFAULT_MODEL, "credits_used": True}
+    return _extract_json_object(content or ""), engine

@@ -26,14 +26,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
-try:
-    from pydantic import BaseModel, field_validator
-except ImportError:
-    from pydantic import BaseModel
-    field_validator = None
-
-from services.analyzer import analyze_text, analyze_text_fallback
+from services.analyzer import analyze_text
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("factshield.main")
@@ -55,14 +50,18 @@ app = FastAPI(
 )
 
 # ---------------------------------------------------------------------------
-# CORS – allows all origins for public web, tunnels, and local dev
+# CORS – public, credential-less API. Restrict with e.g.
+#   CORS_ORIGINS="https://you.github.io,https://factshield.example.com"
+# (Wildcard origins must not be combined with allow_credentials=True.)
 # ---------------------------------------------------------------------------
+
+CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -70,10 +69,13 @@ app.add_middleware(
 # Pydantic schemas
 # ---------------------------------------------------------------------------
 
+MAX_TEXT_LENGTH = int(os.environ.get("MAX_TEXT_LENGTH", "10000"))
+
+
 class TextRequest(BaseModel):
     """Request body for the /analyze endpoint."""
-    text: str = ""
-    sarvam_api_key: Optional[str] = None
+    text: str = Field("", max_length=MAX_TEXT_LENGTH)
+    sarvam_api_key: Optional[str] = Field(None, max_length=512)
 
 
 class HealthResponse(BaseModel):
@@ -94,22 +96,23 @@ async def api_health():
 async def analyze(request: TextRequest):
     """
     Analyse submitted text for hallucinations, bias, and unverified claims.
-    Resilient design ensures it always returns structured output for every text.
+
+    Sarvam AI failures already degrade to the heuristic engine inside
+    ``analyze_text``; anything raised here is a genuine bug and is reported as
+    a 500 rather than masked with a fabricated "high trust" result.
     """
     try:
-        input_text = request.text or ""
-        result = analyze_text(input_text, sarvam_api_key=request.sarvam_api_key)
-        return result
-    except Exception as exc:
-        logger.warning(f"Analysis raised exception: {exc}. Utilizing resilient fallback.")
-        return analyze_text_fallback(request.text or "")
+        return analyze_text(request.text, sarvam_api_key=request.sarvam_api_key)
+    except Exception:
+        logger.exception("Analysis failed")
+        raise HTTPException(status_code=500, detail="Analysis failed due to an internal error.")
 
 
 # ---------------------------------------------------------------------------
 # Static Web Hosting (Serves React frontend on the web)
 # ---------------------------------------------------------------------------
 
-FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+FRONTEND_DIST = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist"))
 
 if os.path.exists(FRONTEND_DIST):
     # Mount assets folder for built JS/CSS
@@ -123,14 +126,18 @@ if os.path.exists(FRONTEND_DIST):
         return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
 
     # Fallback for client-side routing and static files (favicon, etc.)
-    @app.get("/{full_path:path}", tags=["Web App"])
+    @app.get("/{full_path:path}", tags=["Web App"], include_in_schema=False)
     async def serve_spa(full_path: str):
-        file_path = os.path.join(FRONTEND_DIST, full_path)
-        if os.path.exists(file_path) and os.path.isfile(file_path):
+        # Unknown API-looking or asset paths should 404, not return the SPA shell.
+        if full_path.startswith(("api/", "assets/")):
+            raise HTTPException(status_code=404, detail="Not Found")
+        file_path = os.path.realpath(os.path.join(FRONTEND_DIST, full_path))
+        # Never serve anything outside the build directory.
+        if file_path.startswith(FRONTEND_DIST + os.sep) and os.path.isfile(file_path):
             return FileResponse(file_path)
         return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
 else:
-    @app.get("/", response_model=HealthResponse, tags=["Health"])
+    @app.get("/", tags=["Health"])
     async def root_fallback():
         return {"status": "active", "note": "Frontend not built yet. Run npm run build inside frontend/"}
 

@@ -1,5 +1,12 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
 # Python
 __pycache__/
+.pytest_cache/
+.venv/
 *.py[cod]
 *$py.class
 *.so

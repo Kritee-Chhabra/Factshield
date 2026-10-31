@@ -6,9 +6,9 @@
 
 ## 🌐 Live Web Demo
 
-* **Live Demo URL**: [https://factshield-audit.loca.lt](https://factshield-audit.loca.lt)
-* **First-Time Password**: `219.65.47.110`  
-  *(Localtunnel displays a one-time anti-abuse prompt on your first visit from a new device; paste the IP above and click **"Click to Submit"** to enter the app).*
+The frontend is deployed to **GitHub Pages** by [`.github/workflows/deploy.yml`](./.github/workflows/deploy.yml) on every push to `main`.
+On GitHub Pages there is no Python backend, so the app runs in **Browser Mode**: the heuristic engine runs entirely client-side
+(and Sarvam AI is called directly from the browser if you connect a key). For the full API, deploy the backend (see below).
 
 ---
 
@@ -37,7 +37,7 @@ The production React frontend is pre-built in `frontend/dist/`. You only need Py
 git clone https://github.com/Kritee-Chhabra/Factshield.git
 cd Factshield
 
-# 2. Install Python dependencies
+# 2. Install Python dependencies (Python 3.10+)
 pip install -r requirements.txt
 
 # 3. Start unified web server
@@ -108,41 +108,112 @@ curl -X POST "http://localhost:8000/analyze" \
   -d '{"text": "According to the WHO, vaccines are proven to be safe and effective. In contrast, 99% of online claims are completely fabricated without proof."}'
 ```
 
-#### Sample Response:
+Request limits: `text` up to `MAX_TEXT_LENGTH` characters (default 10,000; larger inputs return `422`).
+An optional `sarvam_api_key` field switches the request to Sarvam AI; if that call fails, the heuristic engine is used and `engine.notice` explains why.
+
+#### Sample Response (second claim omitted for brevity):
 ```json
 {
-  "overall_trust_score": 75.0,
-  "summary": "Moderate trust. Some claims require independent verification.",
+  "overall_trust_score": 24.0,
+  "summary": "Low trust. Multiple unverified, biased, or hallucinated claims detected. Analysed 2 claim(s): 0 verified, 0 unverified, 2 flagged.",
   "claims": [
     {
       "id": 1,
       "claim_text": "According to the WHO, vaccines are proven to be safe and effective.",
-      "status": "Verified",
-      "confidence": 0.95,
-      "reason": "Includes credible citation or verified language — adds trustworthiness.",
-      "flags": ["fact_verified"]
-    },
-    {
-      "id": 2,
-      "claim_text": "In contrast, 99% of online claims are completely fabricated without proof.",
       "status": "Flagged",
-      "confidence": 0.40,
-      "reason": "Contains absolute language. Statistical claim without a verifiable source citation.",
-      "flags": ["hallucination", "unverified_stat"]
+      "confidence": 0.7,
+      "reason": "Contains absolute or extreme certainty assertions typical of fabricated text. Includes verified source citation or documented evidence.",
+      "flags": [
+        "hallucination",
+        "fact_verified"
+      ],
+      "dimensions": {
+        "fact_check": "verified",
+        "hallucination": "flagged",
+        "bias": "clean",
+        "emotional": "clean",
+        "statistics": "clean"
+      }
     }
   ],
   "metrics": {
-    "fact_check": { "verified_count": 1, "debunked_count": 0, "neutral_count": 0 },
-    "hallucination_count": 1,
-    "bias_detected": false,
-    "bias_count": 0,
-    "emotional_manipulation_score": 0.0,
-    "emotional_count": 0,
-    "unverified_stats_count": 1,
+    "fact_check": {
+      "verified_count": 0,
+      "debunked_count": 0,
+      "neutral_count": 2,
+      "score": 0.0
+    },
+    "hallucination": {
+      "count": 2,
+      "score": 0.0,
+      "risk": "Severe"
+    },
+    "bias": {
+      "detected": false,
+      "count": 0,
+      "score": 100.0,
+      "level": "Neutral"
+    },
+    "emotional": {
+      "score": 0.0,
+      "count": 0,
+      "intensity": "Calm / Objective"
+    },
+    "statistics": {
+      "unverified_count": 1,
+      "score": 50.0,
+      "status": "Unverified Statistics"
+    },
     "total_claims": 2
+  },
+  "scores": {
+    "trust": 24.0,
+    "fact_checking": 0.0,
+    "hallucination": 0.0,
+    "bias": 100.0,
+    "emotional": 0.0,
+    "statistics": 50.0
+  },
+  "engine": {
+    "name": "Heuristic Engine",
+    "model": "local",
+    "credits_used": false
   }
 }
 ```
+
+Every engine (server heuristics, browser heuristics, Sarvam AI) returns this same shape.
+
+---
+
+## ⚙️ Configuration
+
+All settings are optional environment variables (see [`.env.example`](./.env.example)):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SARVAM_API_KEY` | — | Server-side Sarvam AI key; enables LLM analysis for every request. |
+| `SARVAM_MODEL` | `sarvam-105b` | Sarvam chat model. |
+| `SARVAM_TIMEOUT` | `30` | Sarvam request timeout (seconds). |
+| `CORS_ORIGINS` | `*` | Comma-separated allowed origins. |
+| `MAX_TEXT_LENGTH` | `10000` | Maximum `/analyze` input length. |
+| `VITE_API_BASE` (build time) | — | Point a statically hosted frontend at a remote backend. |
+
+---
+
+## 🧪 Tests
+
+```bash
+# Backend
+pip install -r requirements-dev.txt
+python -m pytest
+
+# Frontend
+cd frontend && npm ci && npm run lint && npm test
+```
+
+`tests/fixtures/engine_parity.json` is asserted by **both** test suites so the Python and browser engines stay identical.
+CI ([`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) runs all of the above on every push and pull request.
 
 ---
 
@@ -150,25 +221,27 @@ curl -X POST "http://localhost:8000/analyze" \
 
 ```
 Factshield/
-├── main.py                 # Unified FastAPI entry point (serves API & Web UI)
-├── requirements.txt        # Python backend dependencies
-├── render.yaml             # 1-click Render.com cloud deployment config
-├── Procfile                # Heroku / Railway start script
-├── Dockerfile              # Multi-stage production container build
-├── DEPLOYMENT.md           # Detailed web hosting guide
+├── main.py                     # Unified FastAPI entry point (serves API & Web UI)
+├── requirements.txt            # Python runtime dependencies
+├── requirements-dev.txt        # + test dependencies
+├── render.yaml / Procfile      # Render.com / Heroku / Railway deployment
+├── Dockerfile                  # Multi-stage production container build
+├── DEPLOYMENT.md               # Detailed web hosting guide
 ├── services/
-│   ├── __init__.py
-│   └── analyzer.py         # Core heuristic audit engine (6 verification layers)
-└── frontend/               # React + Vite client
-    ├── index.html
-    ├── package.json
-    ├── vite.config.js      # Dev server with proxy to /analyze
-    ├── dist/               # Pre-compiled static production assets
+│   ├── analyzer.py             # Heuristic audit engine + canonical report builder
+│   └── sarvam_client.py        # Sarvam AI (LLM) client
+├── tests/                      # pytest suite + shared engine parity fixture
+└── frontend/                   # React + Vite client
+    ├── vite.config.js          # Dev server with proxy to the FastAPI backend
+    ├── dist/                   # Pre-compiled production build (served by main.py)
     └── src/
-        ├── App.jsx         # Interactive dashboard, 6 feature buttons, live filters
-        ├── App.css         # Classy dark graphite titanium & emerald design system
-        └── index.css       # Core tokens & variables
+        ├── App.jsx             # Dashboard, 6 feature views, filters
+        └── services/
+            ├── localAnalyzer.js       # Browser engine (mirror of analyzer.py) + Sarvam direct call
+            └── localAnalyzer.test.js  # node:test suite
 ```
+
+> After changing anything in `frontend/src`, run `npm run build` so `frontend/dist` stays in sync for Python-only users.
 
 ---
 

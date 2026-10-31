@@ -4,19 +4,21 @@ This guide shows how to share FactShield with anyone on the web.
 
 ---
 
-## ⚡ Option 1: Instant Live Public Link (Active Right Now!)
+## ⚡ Option 1: GitHub Pages (Static, Browser Mode)
 
-FactShield is currently being tunneled to a public HTTPS URL:
+Pushing to `main` runs [`.github/workflows/deploy.yml`](./.github/workflows/deploy.yml), which lints, tests and builds
+`frontend/` and publishes it to GitHub Pages (enable **Settings → Pages → Source: GitHub Actions** once).
 
-* **Public Web Link**: [https://factshield-audit.loca.lt](https://factshield-audit.loca.lt)
-* **First-Time Password**: `219.65.47.110`  
-  *(Localtunnel displays a one-time anti-abuse prompt on first visit; simply enter the IP address above and click "Click to Submit" to view the app).*
+Without a backend the app runs the heuristic engine in the browser. To use a hosted backend instead,
+set the `VITE_API_BASE` environment variable (e.g. `https://factshield.onrender.com`) for the build step
+and add your Pages origin to the backend's `CORS_ORIGINS`.
 
-Anyone on a phone, tablet, or another computer can open this link and use FactShield immediately!
+For a quick temporary public link to a local server you can also use a tunnel such as
+`npx localtunnel --port 8000` or `cloudflared tunnel --url http://localhost:8000`.
 
 ---
 
-## 🌐 Option 2: Permanent 24/7 Free Cloud Hosting (Recommended)
+## 🌐 Option 2: Full-Stack 24/7 Cloud Hosting (Recommended)
 
 To keep FactShield online 24/7 even when your PC is turned off, deploy it to a free cloud hosting provider:
 
@@ -34,14 +36,15 @@ To keep FactShield online 24/7 even when your PC is turned off, deploy it to a f
 3. Connect your GitHub repository.
 4. Set the following settings:
    - **Environment**: `Python`
-   - **Build Command**: `cd frontend && npm install && npm run build && cd .. && pip install -r requirements.txt`
+   - **Build Command**: `cd frontend && npm ci && npm run build && cd .. && pip install -r requirements.txt`
    - **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-5. Click **Create Web Service**. Render will give you a permanent URL like `https://factshield.onrender.com`.
+5. Optionally add a `SARVAM_API_KEY` environment variable to enable Sarvam AI analysis server-side.
+6. Click **Create Web Service**. Render will give you a permanent URL like `https://factshield.onrender.com`.
 
 ---
 
 ### B. Deploy via Docker (Railway, Fly.io, or Hugging Face Spaces)
-The repository includes a production multi-stage [Dockerfile](file:///c:/Users/V5%20IT%20SOLUTION/Desktop/backend/Dockerfile):
+The repository includes a production multi-stage [Dockerfile](./Dockerfile):
 * **Hugging Face Spaces**: Create a new Space with the `Docker` SDK, push this repo, and it automatically deploys with a free, persistent HTTPS URL!
 * **Railway**: Click "New Project" → "Deploy from GitHub repo". Railway detects the `Dockerfile` or `Procfile` and deploys automatically.
 * **Fly.io**: Run `fly launch` in this directory.
@@ -50,6 +53,8 @@ The repository includes a production multi-stage [Dockerfile](file:///c:/Users/V
 
 ## 🛠️ Architecture Summary for Web
 
-* **Unified Serving**: [main.py](file:///c:/Users/V5%20IT%20SOLUTION/Desktop/backend/main.py) automatically serves both the compiled React frontend (`/`) and the API (`/analyze`, `/docs`, `/api/health`) from a single process and port.
+* **Unified Serving**: [main.py](./main.py) automatically serves both the compiled React frontend (`/`) and the API (`/analyze`, `/docs`, `/api/health`) from a single process and port.
 * **Relative Endpoints**: The frontend connects via relative paths (`/analyze`), eliminating CORS configuration and port mismatches.
+* **Graceful Degradation**: If the backend is unreachable, the frontend runs the same heuristic engine client-side.
+* **Configuration**: See the *Configuration* table in the [README](./README.md#️-configuration) and [`.env.example`](./.env.example).
 * **Dynamic Binding**: Reads `HOST` and `PORT` environment variables to seamlessly adapt to any cloud container or hosting environment.

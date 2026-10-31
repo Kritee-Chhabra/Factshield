@@ -360,7 +360,7 @@ export function normalizeLlmReport(raw, engine) {
 
 // ── Direct Sarvam AI call (static hosting only) ──────────────────────────────
 
-const SARVAM_MODEL = 'sarvam-105b'
+const SARVAM_MODEL = 'sarvam-105b-conversations'
 
 // Keep in sync with SYSTEM_PROMPT in services/sarvam_client.py
 const SARVAM_SYSTEM_PROMPT = `You are FactShield, an authoritative AI Hallucination & Bias Auditor.
@@ -431,6 +431,7 @@ export async function callSarvamDirect(text, apiKey, { timeoutMs = 45000 } = {})
           { role: 'user', content: `Audit the following text across all 6 checks:\n\n${text}` },
         ],
         temperature: 0.1,
+        max_tokens: 1500,
       }),
     })
 

@@ -16,8 +16,8 @@ import urllib.request
 logger = logging.getLogger("factshield.sarvam")
 
 SARVAM_API_URL = os.environ.get("SARVAM_API_URL", "https://api.sarvam.ai/v1/chat/completions")
-DEFAULT_MODEL = os.environ.get("SARVAM_MODEL", "sarvam-105b")
-REQUEST_TIMEOUT_SECONDS = float(os.environ.get("SARVAM_TIMEOUT", "30"))
+DEFAULT_MODEL = os.environ.get("SARVAM_MODEL", "sarvam-105b-conversations")
+REQUEST_TIMEOUT_SECONDS = float(os.environ.get("SARVAM_TIMEOUT", "45"))
 
 SYSTEM_PROMPT = """You are FactShield, an authoritative AI Hallucination & Bias Auditor.
 Analyze the user's text for truthfulness, hallucinations, bias, emotional manipulation, and statistics verification.
@@ -129,6 +129,7 @@ def analyze_with_sarvam(text: str, api_key: str) -> tuple[dict, dict]:
             },
         ],
         "temperature": 0.1,
+        "max_tokens": 1500,
     }
 
     req = urllib.request.Request(

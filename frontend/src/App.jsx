@@ -259,21 +259,28 @@ export default function App() {
 
       // Tier 2: Try Backend API (/analyze)
       if (!data) {
-        try {
-          const res = await fetch(`${API_BASE}/analyze`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: textToRun,
-              sarvam_api_key: sarvamToken || undefined
-            }),
-          })
+        const isStaticHost = window.location.hostname.endsWith('github.io') && !API_BASE
+        if (!isStaticHost) {
+          try {
+            const controller = new AbortController()
+            const timeoutId = setTimeout(() => controller.abort(), 3000)
+            const res = await fetch(`${API_BASE}/analyze`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: controller.signal,
+              body: JSON.stringify({
+                text: textToRun,
+                sarvam_api_key: sarvamToken || undefined
+              }),
+            })
+            clearTimeout(timeoutId)
 
-          if (res.ok) {
-            data = await res.json()
+            if (res.ok) {
+              data = await res.json()
+            }
+          } catch (apiErr) {
+            console.warn('Backend server not reachable on localhost/remote. Using resilient client-side web engine.', apiErr)
           }
-        } catch (apiErr) {
-          console.warn('Backend server not reachable on localhost/remote. Using resilient client-side web engine.', apiErr)
         }
       }
 

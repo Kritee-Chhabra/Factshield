@@ -4,11 +4,15 @@
 
 ---
 
-## 🌐 Live Web Demo
+## 🌐 Live Demo — Try It Now (No Installation Required)
 
-The frontend is deployed to **GitHub Pages** by [`.github/workflows/deploy.yml`](./.github/workflows/deploy.yml) on every push to `main`.
-On GitHub Pages there is no Python backend, so the app runs in **Browser Mode**: the heuristic engine runs entirely client-side
-(and Sarvam AI is called directly from the browser if you connect a key). For the full API, deploy the backend (see below).
+[![🚀 Open Live App](https://img.shields.io/badge/🚀%20Live%20App-kritee--chhabra.github.io%2FFactshield-blue?style=for-the-badge&logo=github)](https://kritee-chhabra.github.io/Factshield/)
+
+**👉 [https://kritee-chhabra.github.io/Factshield/](https://kritee-chhabra.github.io/Factshield/)**
+
+> Open the link above in any browser — no terminal, no Python, no installation needed.
+> The full 6-dimension audit engine runs entirely inside your browser via the built-in client-side heuristic engine.
+> Optionally connect your **Sarvam AI API key** in the app's token modal for deep LLM-powered analysis.
 
 ---
 

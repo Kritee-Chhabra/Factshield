@@ -1,9 +1,48 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { analyzeLocally, callSarvamDirect } from './services/localAnalyzer'
 import './App.css'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 const MAX_CHARS = 5000
+const TOKEN_STORAGE_KEY = 'factshield_sarvam_token'
+
+// On static hosts (GitHub Pages) there is no FastAPI backend unless VITE_API_BASE points to one.
+const IS_STATIC_HOST = !API_BASE && window.location.hostname.endsWith('github.io')
+const HAS_BACKEND = !IS_STATIC_HOST
+
+// Heuristic analysis is near-instant; a Sarvam LLM audit via the backend can take ~30s.
+const BACKEND_TIMEOUT_MS = 10000
+const BACKEND_LLM_TIMEOUT_MS = 45000
+
+// localStorage can throw (privacy modes, blocked storage) — never let that break the app.
+function readStoredToken() {
+  try {
+    return localStorage.getItem(TOKEN_STORAGE_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+function writeStoredToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token)
+    else localStorage.removeItem(TOKEN_STORAGE_KEY)
+  } catch {
+    // ignore — token simply won't persist across reloads
+  }
+}
+
+const EMPTY_SCORES = { trust: 0, fact_checking: 0, hallucination: 0, bias: 0, emotional: 0, statistics: 0 }
+
+// Keyboard support for non-<button> elements that act as buttons.
+function activateOnKey(handler) {
+  return e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      handler()
+    }
+  }
+}
 
 // ── Curated Sample Test Cases for the 6 Audit Features ────────────────────────
 const AUDIT_FEATURES = [
@@ -215,7 +254,7 @@ export default function App() {
   const [sampleNotice, setSampleNotice] = useState(null)
 
   // Sarvam AI Token State
-  const [sarvamToken, setSarvamToken] = useState(() => localStorage.getItem('factshield_sarvam_token') || '')
+  const [sarvamToken, setSarvamToken] = useState(readStoredToken)
   const [isTokenModalOpen, setIsTokenModalOpen] = useState(false)
   const [tempToken, setTempToken] = useState('')
 
@@ -225,15 +264,19 @@ export default function App() {
   const charLen = text.length
   const charClass = charLen > MAX_CHARS ? 'over' : charLen > MAX_CHARS * 0.8 ? 'warn' : ''
 
+  // Close the token modal with Escape
+  useEffect(() => {
+    if (!isTokenModalOpen) return
+    const onKey = e => { if (e.key === 'Escape') setIsTokenModalOpen(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [isTokenModalOpen])
+
   // Sync token to localStorage
   const saveSarvamToken = (token) => {
     const trimmed = token.trim()
     setSarvamToken(trimmed)
-    if (trimmed) {
-      localStorage.setItem('factshield_sarvam_token', trimmed)
-    } else {
-      localStorage.removeItem('factshield_sarvam_token')
-    }
+    writeStoredToken(trimmed)
     setIsTokenModalOpen(false)
   }
 
@@ -247,47 +290,55 @@ export default function App() {
 
     try {
       let data = null
+      let notice = null
 
-      // Tier 1: If user provided Sarvam AI token, attempt direct Sarvam AI call or backend with token
-      if (sarvamToken) {
+      // Tier 1: Backend API (/analyze). It uses Sarvam AI server-side when a token is
+      // supplied (or configured via SARVAM_API_KEY) and falls back to heuristics itself.
+      if (HAS_BACKEND) {
+        const controller = new AbortController()
+        const timeoutId = setTimeout(
+          () => controller.abort(),
+          sarvamToken ? BACKEND_LLM_TIMEOUT_MS : BACKEND_TIMEOUT_MS,
+        )
+        try {
+          const res = await fetch(`${API_BASE}/analyze`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: JSON.stringify({
+              text: textToRun,
+              sarvam_api_key: sarvamToken || undefined,
+            }),
+          })
+          if (res.ok) {
+            data = await res.json()
+            notice = data?.engine?.notice || null
+          } else {
+            console.warn(`Backend returned HTTP ${res.status}; using client-side engine.`)
+          }
+        } catch (apiErr) {
+          console.warn('Backend not reachable; using client-side engine.', apiErr)
+        } finally {
+          clearTimeout(timeoutId)
+        }
+      }
+
+      // Tier 2: No backend (static hosting) — call Sarvam AI directly from the browser.
+      if (!data && !HAS_BACKEND && sarvamToken) {
         try {
           data = await callSarvamDirect(textToRun, sarvamToken)
         } catch (sarvamErr) {
-          console.warn('Direct Sarvam call failed, trying backend...', sarvamErr)
+          console.warn('Direct Sarvam AI call failed; using client-side engine.', sarvamErr)
+          notice = 'Sarvam AI request failed, so this report was produced by the built-in heuristic engine.'
         }
       }
 
-      // Tier 2: Try Backend API (/analyze)
-      if (!data) {
-        const isStaticHost = window.location.hostname.endsWith('github.io') && !API_BASE
-        if (!isStaticHost) {
-          try {
-            const controller = new AbortController()
-            const timeoutId = setTimeout(() => controller.abort(), 3000)
-            const res = await fetch(`${API_BASE}/analyze`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              signal: controller.signal,
-              body: JSON.stringify({
-                text: textToRun,
-                sarvam_api_key: sarvamToken || undefined
-              }),
-            })
-            clearTimeout(timeoutId)
-
-            if (res.ok) {
-              data = await res.json()
-            }
-          } catch (apiErr) {
-            console.warn('Backend server not reachable on localhost/remote. Using resilient client-side web engine.', apiErr)
-          }
-        }
-      }
-
-      // Tier 3: Resilient Client-Side Fallback (guarantees web app NEVER fails on web/localhost)
+      // Tier 3: Client-side heuristic engine — always available.
       if (!data) {
         data = analyzeLocally(textToRun)
       }
+
+      if (notice) setError(notice)
 
       setResult(data)
       setStatusFilter('All')
@@ -347,41 +398,22 @@ export default function App() {
   // ── Claims and Dimensional Breakdowns
   const allClaims = result?.claims ?? []
 
-  // Check specific issues for the selected tab
-  let flaggedInTab = []
-  let tabTitle = 'All Claims Breakdown'
-
-  if (activeTab === 'fact_check') {
-    tabTitle = 'Fact Checking & Citations'
-    flaggedInTab = allClaims.filter(c => c.flags?.includes('fact_debunked') || c.status === 'Flagged')
-  } else if (activeTab === 'hallucination') {
-    tabTitle = 'Hallucinations & Fabrications'
-    flaggedInTab = allClaims.filter(c => c.flags?.includes('hallucination') || c.status === 'Flagged')
-  } else if (activeTab === 'bias') {
-    tabTitle = 'Biased Framing & Loaded Rhetoric'
-    flaggedInTab = allClaims.filter(c => c.flags?.includes('bias'))
-  } else if (activeTab === 'emotional') {
-    tabTitle = 'Emotional Manipulation Triggers'
-    flaggedInTab = allClaims.filter(c => c.flags?.includes('emotional'))
-  } else if (activeTab === 'unverified_stat') {
-    tabTitle = 'Statistics Verification'
-    flaggedInTab = allClaims.filter(c => c.flags?.includes('unverified_stat'))
+  const TAB_TITLES = {
+    fact_check: 'Fact Checking & Citations',
+    hallucination: 'Hallucinations & Fabrications',
+    bias: 'Biased Framing & Loaded Rhetoric',
+    emotional: 'Emotional Manipulation Triggers',
+    unverified_stat: 'Statistics Verification',
   }
+  const tabTitle = TAB_TITLES[activeTab] || 'All Claims Breakdown'
 
   // Apply Status Filter across allClaims
   const displayedClaims = statusFilter === 'All'
     ? allClaims
     : allClaims.filter(c => c.status === statusFilter)
 
-  // Scores and Metrics
-  const scores = result?.scores || {
-    trust: result?.overall_trust_score || 0,
-    fact_checking: result?.metrics?.fact_check?.score || (result?.metrics?.fact_check?.verified_count ? Math.round((result.metrics.fact_check.verified_count / Math.max(allClaims.length, 1)) * 100) : 0),
-    hallucination: result?.metrics?.hallucination?.score || Math.max(0, 100 - (result?.metrics?.hallucination?.count || result?.metrics?.hallucination_count || 0) * 30),
-    bias: result?.metrics?.bias?.score || ((result?.metrics?.bias?.detected || result?.metrics?.bias_detected) ? 40 : 100),
-    emotional: result?.metrics?.emotional?.score || result?.metrics?.emotional_manipulation_score || 0,
-    statistics: result?.metrics?.statistics?.score || ((result?.metrics?.statistics?.unverified_count || result?.metrics?.unverified_stats_count || 0) > 0 ? 30 : 100),
-  }
+  // Scores and Metrics — every engine returns the canonical report shape (see buildReport).
+  const scores = { ...EMPTY_SCORES, ...(result?.scores || {}) }
 
   const m = result?.metrics
   const vd = result ? getVerdictInfo(result.overall_trust_score) : null
@@ -413,19 +445,21 @@ export default function App() {
             <span>{sarvamToken ? 'Sarvam Credits Active' : 'Connect Sarvam AI'}</span>
           </button>
 
-          <a
-            className="nav-btn"
-            href={`${API_BASE}/docs`}
-            target="_blank"
-            rel="noreferrer"
-            title="View Interactive REST API"
-          >
-            REST API
-          </a>
+          {HAS_BACKEND && (
+            <a
+              className="nav-btn"
+              href={`${API_BASE}/docs`}
+              target="_blank"
+              rel="noreferrer"
+              title="View Interactive REST API"
+            >
+              REST API
+            </a>
+          )}
 
           <div className="system-status">
             <span className="status-indicator" />
-            <span>Web Online</span>
+            <span>{HAS_BACKEND ? 'Web Online' : 'Browser Mode'}</span>
           </div>
         </div>
       </header>
@@ -433,12 +467,18 @@ export default function App() {
       {/* ── Sarvam AI Token Modal ── */}
       {isTokenModalOpen && (
         <div className="modal-overlay" onClick={() => setIsTokenModalOpen(false)}>
-          <div className="modal-card" onClick={e => e.stopPropagation()}>
+          <div
+            className="modal-card"
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sarvam-modal-title"
+          >
             <div className="modal-header">
-              <div className="modal-title">
+              <div className="modal-title" id="sarvam-modal-title">
                 <span>⚡ Connect Sarvam AI (Credits &amp; Tokens)</span>
               </div>
-              <button className="modal-close" onClick={() => setIsTokenModalOpen(false)}>✕</button>
+              <button className="modal-close" onClick={() => setIsTokenModalOpen(false)} type="button" aria-label="Close">✕</button>
             </div>
             <p className="modal-desc">
               Enter your <strong>Sarvam AI API Key</strong> from <a href="https://dashboard.sarvam.ai" target="_blank" rel="noreferrer">dashboard.sarvam.ai</a> to power FactShield with Sarvam's flagship <strong>sarvam-105b</strong> LLM for deep Indian languages and global truth analysis.
@@ -452,6 +492,9 @@ export default function App() {
                 placeholder="sk_... or api-subscription-key"
                 value={tempToken}
                 onChange={e => setTempToken(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') saveSarvamToken(tempToken) }}
+                autoComplete="off"
+                autoFocus
               />
             </div>
             <div className="modal-actions">
@@ -536,7 +579,7 @@ export default function App() {
         {sampleNotice && (
           <div className="sample-banner">
             <span>✨ {sampleNotice}</span>
-            <button className="sample-banner-close" onClick={() => setSampleNotice(null)}>✕</button>
+            <button className="sample-banner-close" onClick={() => setSampleNotice(null)} type="button" aria-label="Dismiss">✕</button>
           </div>
         )}
 
@@ -568,7 +611,7 @@ export default function App() {
             </div>
             {result?.engine && (
               <span className="engine-badge">
-                {result.engine.credits_used ? '⚡ Powered by Sarvam AI (sarvam-105b)' : '🛡️ Engine: Multi-Layer Heuristic'}
+                {result.engine.credits_used ? `⚡ Powered by Sarvam AI (${result.engine.model})` : '🛡️ Engine: Multi-Layer Heuristic'}
               </span>
             )}
           </div>
@@ -871,6 +914,7 @@ export default function App() {
               <div
                 className={`feat-card ${activeTab === 'fact_check' ? 'is-active' : ''}`}
                 onClick={() => setActiveTab('fact_check')}
+                onKeyDown={activateOnKey(() => setActiveTab('fact_check'))}
                 role="button"
                 tabIndex={0}
               >
@@ -886,6 +930,7 @@ export default function App() {
               <div
                 className={`feat-card ${activeTab === 'hallucination' ? 'is-active' : ''}`}
                 onClick={() => setActiveTab('hallucination')}
+                onKeyDown={activateOnKey(() => setActiveTab('hallucination'))}
                 role="button"
                 tabIndex={0}
               >
@@ -903,6 +948,7 @@ export default function App() {
               <div
                 className={`feat-card ${activeTab === 'bias' ? 'is-active' : ''}`}
                 onClick={() => setActiveTab('bias')}
+                onKeyDown={activateOnKey(() => setActiveTab('bias'))}
                 role="button"
                 tabIndex={0}
               >
@@ -920,6 +966,7 @@ export default function App() {
               <div
                 className={`feat-card ${activeTab === 'emotional' ? 'is-active' : ''}`}
                 onClick={() => setActiveTab('emotional')}
+                onKeyDown={activateOnKey(() => setActiveTab('emotional'))}
                 role="button"
                 tabIndex={0}
               >
@@ -937,6 +984,7 @@ export default function App() {
               <div
                 className={`feat-card ${activeTab === 'unverified_stat' ? 'is-active' : ''}`}
                 onClick={() => setActiveTab('unverified_stat')}
+                onKeyDown={activateOnKey(() => setActiveTab('unverified_stat'))}
                 role="button"
                 tabIndex={0}
               >
@@ -954,6 +1002,7 @@ export default function App() {
               <div
                 className={`feat-card ${activeTab === 'trust_score' ? 'is-active' : ''}`}
                 onClick={() => setActiveTab('trust_score')}
+                onKeyDown={activateOnKey(() => setActiveTab('trust_score'))}
                 role="button"
                 tabIndex={0}
               >
@@ -1087,11 +1136,13 @@ export default function App() {
       <footer className="footer">
         <div className="footer-content">
           <span>FactShield © {new Date().getFullYear()} — Multi-Layer AI Truth &amp; Bias Platform</span>
-          <div className="footer-links">
-            <a href={`${API_BASE}/docs`} target="_blank" rel="noreferrer">Interactive API Docs</a>
-            <span>•</span>
-            <a href={`${API_BASE}/redoc`} target="_blank" rel="noreferrer">ReDoc Specification</a>
-          </div>
+          {HAS_BACKEND && (
+            <div className="footer-links">
+              <a href={`${API_BASE}/docs`} target="_blank" rel="noreferrer">Interactive API Docs</a>
+              <span>•</span>
+              <a href={`${API_BASE}/redoc`} target="_blank" rel="noreferrer">ReDoc Specification</a>
+            </div>
+          )}
         </div>
       </footer>
     </div>

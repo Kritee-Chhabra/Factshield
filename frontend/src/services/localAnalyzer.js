@@ -2,45 +2,71 @@
  * frontend/src/services/localAnalyzer.js
  *
  * Client-side analyzer engine for FactShield.
- * Ensures FactShield works 100% on the web anywhere,
- * even on static web hosts (GitHub Pages, Vercel, Netlify)
- * without needing an active localhost server.
- * Also handles direct browser-to-Sarvam-AI requests when token is provided.
+ * Lets FactShield work on static hosts (GitHub Pages, Vercel, Netlify)
+ * without a backend, and handles direct browser-to-Sarvam-AI requests.
+ *
+ * Mirrors services/analyzer.py — keep lexicons, patterns and scoring in sync.
  */
 
-const ABSOLUTE_WORDS = new Set([
+// ── Lexicons ─────────────────────────────────────────────────────────────────
+
+const ABSOLUTE_TERMS = [
   'always', 'never', 'definitely', 'undoubtedly', 'proven', 'guaranteed',
   'impossible', 'unquestionably', 'indisputable', 'certainly', '100%',
-  'unconditionally', 'infallible', 'undeniable', 'absolute', 'completely'
-])
+  'unconditionally', 'infallible', 'undeniable', 'absolute', 'completely',
+  'without doubt', 'everyone knows', "it's obvious", 'of course',
+]
 
 const HALLUCINATION_PHRASES = [
   'experts agree', 'everyone knows', 'studies show', 'research proves',
   'scientists have found', 'widely known', 'without doubt', 'it is obvious',
-  'conclusively proven', 'unanimously accepted', 'it is common knowledge'
+  'conclusively proven', 'unanimously accepted', 'it is common knowledge',
 ]
 
-const EMOTIONAL_WORDS = new Set([
+const EMOTIONAL_TERMS = [
   'shocking', 'devastating', 'miracle', 'catastrophic', 'terrifying',
   'horrific', 'unbelievable', 'nightmare', 'disastrous', 'apocalyptic',
   'mind-blowing', 'jaw-dropping', 'sensational', 'panic', 'agony',
-  'ruin', 'destroy', 'horrifying', 'frightening', 'deadly'
-])
+  'ruin', 'destroy', 'horrifying', 'frightening', 'deadly',
+]
 
-const BIAS_WORDS = new Set([
+const BIAS_TERMS = [
   'obviously', 'clearly', 'naturally', 'as expected', 'of course',
   'needless to say', 'undeniably', 'plainly', 'predictably', 'unquestionably',
-  'patently', 'morally superior', 'corrupt', 'malicious', 'evil'
-])
+  'patently', 'morally superior', 'corrupt', 'malicious', 'evil',
+]
 
-const STAT_REGEX = /\b(?:\d+(?:\.\d+)?%|\$\d+(?:\.\d+)?(?:\s*(?:billion|million|trillion))?|\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:percent|times|fold|people|users|patients|cases))\b/i
-const CITE_REGEX = /\b(?:according to|published in|cited by|reported by|peer-reviewed|journal of|nature|lancet|reuters|who|cdc|nasa|iea|associated press|bbc|nih|world bank|stanford|mit|harvard|oxford|university of|et al\.)\b/i
+const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** Whole-word / multi-word / hyphenated phrase matcher (hyphens are word chars). */
+function termRegex(terms) {
+  const alternation = [...terms].sort((a, b) => b.length - a.length).map(escapeRegex).join('|')
+  return new RegExp(`(?<![\\w-])(?:${alternation})(?![\\w-])`, 'gi')
+}
+
+const ABSOLUTE_REGEX = termRegex(ABSOLUTE_TERMS)
+const HALLUCINATION_REGEX = termRegex(HALLUCINATION_PHRASES)
+const EMOTIONAL_REGEX = termRegex(EMOTIONAL_TERMS)
+const BIAS_REGEX = termRegex(BIAS_TERMS)
+
+// Percentages, currency amounts and counted quantities.
+const STAT_REGEX = /(?<![\w.])\d+(?:[.,]\d+)*\s?%|[$€£₹]\s?\d+(?:[.,]\d+)*(?:\s*(?:k|m|bn|billion|million|trillion|crore|lakh)\b)?|\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:percent|per cent|times|fold|people|users|patients|cases|deaths|billion|million|trillion)\b/i
+const CITE_PHRASE_REGEX = /(?<!\w)(?:according to|published in|cited by|reported by|peer-reviewed|journal of|the lancet|lancet|reuters|associated press|world bank|world health organi[sz]ation|international energy agency|centers for disease control|stanford|harvard|oxford|university of|et al\.)(?!\w)/i
+// Case-sensitive: these collide with ordinary words when lowercased ("who", "nature").
+const CITE_ACRONYM_REGEX = /\b(?:WHO|CDC|NASA|IEA|BBC|NIH|MIT|Nature)\b/
 const POS_FACT_REGEX = /\b(?:confirmed|verified|documented|corroborated|authenticated|peer-reviewed|official data|established by|substantiated)\b/i
 const NEG_FACT_REGEX = /\b(?:false|incorrect|debunked|misleading|inaccurate|disputed|disproven|unfounded|myth|hoax|conspiracy|rumor)\b/i
 
-function tokenize(text) {
-  return new Set(text.toLowerCase().match(/[\w']+/gu) || [])
-}
+const VALID_STATUSES = ['Verified', 'Unverified', 'Flagged']
+const VALID_FLAGS = ['hallucination', 'bias', 'emotional', 'unverified_stat', 'fact_verified', 'fact_debunked']
+
+const distinctMatches = (regex, text) => new Set([...text.matchAll(regex)].map(m => m[0].toLowerCase())).size
+const hasMatch = (regex, text) => distinctMatches(regex, text) > 0
+const hasCitation = text => CITE_PHRASE_REGEX.test(text) || CITE_ACRONYM_REGEX.test(text)
+const round1 = n => Math.round(n * 10) / 10
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n))
+
+// ── Claim splitting ──────────────────────────────────────────────────────────
 
 export function splitIntoClaims(text) {
   const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
@@ -51,154 +77,161 @@ export function splitIntoClaims(text) {
     const cleaned = line.replace(/^[*•\-–—>\s]+/, '').replace(/^\d+[.)]\s*/, '').trim()
     if (!cleaned) continue
 
-    const parts = cleaned.split(/(?<=[.?!…])\s+(?=[A-Z0-9"'“‘\u0900-\u097F])/).map(p => p.trim()).filter(Boolean)
-    for (const p of parts) {
-      claims.push(p)
-    }
+    const parts = cleaned
+      .split(/(?<=[.?!…])\s+(?=[A-Z0-9"'“‘ऄ-ॿ])/)
+      .map(p => p.trim())
+      .filter(Boolean)
+    claims.push(...parts)
   }
 
-  if (claims.length === 0) {
-    const st = text.trim()
-    if (st) claims.push(st)
-  }
-
+  if (claims.length === 0 && text.trim()) claims.push(text.trim())
   return claims
 }
 
-export function analyzeLocally(text) {
-  const stripped = text ? text.trim() : ''
-  if (!stripped) return null
+// ── Per-claim classification ─────────────────────────────────────────────────
 
-  const rawClaims = splitIntoClaims(stripped)
-  const claims = []
-  let totalEmo = 0
-  let totalBias = 0
-  let hallCount = 0
-  let unverifiedStats = 0
-  let debunkedCount = 0
+function dimensionsFor(status, flags, hasStat = false, hasCite = false) {
+  let factCheck = 'unverified'
+  if (flags.includes('fact_debunked')) factCheck = 'debunked'
+  else if (flags.includes('fact_verified') || status === 'Verified') factCheck = 'verified'
 
-  rawClaims.forEach((claim, idx) => {
-    const tokens = tokenize(claim)
-    const lower = claim.toLowerCase()
-    const flags = []
-    const reasons = []
+  let statistics = 'clean'
+  if (flags.includes('unverified_stat')) statistics = 'unverified'
+  else if (hasStat && hasCite) statistics = 'cited'
 
-    // Hallucination
-    const hasAbs = [...tokens].some(t => ABSOLUTE_WORDS.has(t)) || lower.includes('without doubt') || lower.includes('everyone knows')
-    const hasHalluPhrase = HALLUCINATION_PHRASES.some(p => lower.includes(p))
-    const hasCite = CITE_REGEX.test(claim)
-    const hasStat = STAT_REGEX.test(claim)
+  return {
+    fact_check: factCheck,
+    hallucination: flags.includes('hallucination') || status === 'Flagged' ? 'flagged' : 'clean',
+    bias: flags.includes('bias') ? 'flagged' : 'clean',
+    emotional: flags.includes('emotional') ? 'flagged' : 'clean',
+    statistics,
+  }
+}
 
-    if (hasAbs) {
-      flags.push('hallucination')
-      reasons.push('Contains absolute or extreme certainty assertions typical of fabricated text.')
-    }
-    if (hasHalluPhrase && !hasCite) {
-      if (!flags.includes('hallucination')) flags.push('hallucination')
-      reasons.push("Cites vague authority ('everyone knows', 'studies show') without a named citation.")
-    }
+function classifyClaim(claim, id) {
+  const flags = []
+  const reasons = []
 
-    // Stats
-    if (hasStat && !hasCite) {
-      flags.push('unverified_stat')
-      reasons.push('Statistical metrics or percentages presented without a verifiable source.')
-      unverifiedStats++
-    }
+  const hasCite = hasCitation(claim)
+  const hasAbs = hasMatch(ABSOLUTE_REGEX, claim)
+  const hasHallu = hasMatch(HALLUCINATION_REGEX, claim) && !hasCite
+  const hasStat = STAT_REGEX.test(claim)
+  const emoCount = distinctMatches(EMOTIONAL_REGEX, claim)
+  const biasCount = distinctMatches(BIAS_REGEX, claim)
+  const hasNeg = NEG_FACT_REGEX.test(claim)
+  const hasPos = !hasNeg && (POS_FACT_REGEX.test(claim) || hasCite)
 
-    // Emotional
-    const emoWords = [...tokens].filter(t => EMOTIONAL_WORDS.has(t))
-    if (emoWords.length > 0) {
-      flags.push('emotional')
-      reasons.push(`Uses ${emoWords.length} emotionally charged or sensationalist trigger word(s).`)
-      totalEmo += emoWords.length
-    }
+  // Confidence (identical weights to the Python engine)
+  let confidence = 0.85
+  if (hasAbs) confidence -= 0.3
+  if (emoCount) confidence -= 0.1 * Math.min(emoCount, 3)
+  if (biasCount) confidence -= 0.08 * Math.min(biasCount, 3)
+  if (hasStat && !hasCite) confidence -= 0.2
+  if (hasHallu) confidence -= 0.25
+  if (hasNeg) confidence -= 0.4
+  if (hasCite) confidence += 0.15
+  if (POS_FACT_REGEX.test(claim)) confidence += 0.1
+  confidence = Math.round(clamp(confidence, 0.1, 1) * 100) / 100
 
-    // Bias
-    const biasWords = [...tokens].filter(t => BIAS_WORDS.has(t))
-    if (biasWords.length > 0) {
-      flags.push('bias')
-      reasons.push(`Contains ${biasWords.length} bias indicator(s) suggesting one-sided framing.`)
-      totalBias += biasWords.length
-    }
+  if (hasAbs) {
+    flags.push('hallucination')
+    reasons.push('Contains absolute or extreme certainty assertions typical of fabricated text.')
+  }
+  if (hasHallu) {
+    if (!flags.includes('hallucination')) flags.push('hallucination')
+    reasons.push("Cites vague authority ('everyone knows', 'studies show') without a named citation.")
+  }
+  if (hasStat && !hasCite) {
+    flags.push('unverified_stat')
+    reasons.push('Statistical metrics or percentages presented without a verifiable source.')
+  }
+  if (emoCount) {
+    flags.push('emotional')
+    reasons.push(`Uses ${emoCount} emotionally charged or sensationalist trigger word(s).`)
+  }
+  if (biasCount) {
+    flags.push('bias')
+    reasons.push(`Contains ${biasCount} bias indicator(s) suggesting one-sided framing.`)
+  }
+  if (hasNeg) {
+    flags.push('fact_debunked')
+    reasons.push('Contains language identifying a debunked, disproven, or false assertion.')
+  } else if (hasPos) {
+    flags.push('fact_verified')
+    reasons.push('Includes verified source citation or documented evidence.')
+  }
 
-    // Fact Check
-    const hasNeg = NEG_FACT_REGEX.test(claim)
-    const hasPos = POS_FACT_REGEX.test(claim) || hasCite
+  let status
+  if (hasAbs || hasHallu || hasNeg || confidence < 0.45) {
+    status = 'Flagged'
+    if (flags.length === 0) flags.push('hallucination')
+  } else if ((hasStat && !hasCite) || confidence < 0.75) {
+    status = 'Unverified'
+  } else {
+    status = 'Verified'
+    if (!flags.includes('fact_verified')) flags.push('fact_verified')
+  }
 
-    if (hasNeg) {
-      flags.push('fact_debunked')
-      reasons.push('Contains language identifying a debunked, disproven, or false assertion.')
-      debunkedCount++
-    } else if (hasPos) {
-      flags.push('fact_verified')
-      reasons.push('Includes verified source citation or documented evidence.')
-    }
-
-    // Status
-    let status = 'Verified'
-    let confidence = 0.85
-    if (hasAbs) confidence -= 0.3
-    if (emoWords.length) confidence -= 0.10 * Math.min(emoWords.length, 3)
-    if (biasWords.length) confidence -= 0.08 * Math.min(biasWords.length, 3)
-    if (hasStat && !hasCite) confidence -= 0.2
-    if (hasHalluPhrase && !hasCite) confidence -= 0.25
-    if (hasNeg) confidence -= 0.4
-    if (hasPos) confidence += 0.15
-    confidence = Math.max(0.1, Math.min(1.0, Math.round(confidence * 100) / 100))
-
-    if (hasAbs || (hasHalluPhrase && !hasCite) || hasNeg || confidence < 0.45) {
-      status = 'Flagged'
-      if (!flags.includes('hallucination') && !hasNeg) flags.push('hallucination')
-    } else if ((hasStat && !hasCite) || confidence < 0.75) {
-      status = 'Unverified'
-    } else {
-      status = 'Verified'
-      if (!flags.includes('fact_verified')) flags.push('fact_verified')
-    }
-
-    if (flags.includes('hallucination')) hallCount++
-
-    const dimensions = {
-      fact_check: hasNeg ? 'debunked' : (hasPos || status === 'Verified') ? 'verified' : 'unverified',
-      hallucination: (flags.includes('hallucination') || status === 'Flagged') ? 'flagged' : 'clean',
-      bias: flags.includes('bias') ? 'flagged' : 'clean',
-      emotional: flags.includes('emotional') ? 'flagged' : 'clean',
-      statistics: flags.includes('unverified_stat') ? 'unverified' : (hasStat && hasCite) ? 'cited' : 'clean',
-    }
-
-    claims.push({
-      id: idx + 1,
+  return {
+    claim: {
+      id,
       claim_text: claim,
       status,
       confidence,
       reason: reasons.join(' ') || 'Logical assertion supported by standard factual tone.',
       flags,
-      dimensions,
-    })
-  })
+      dimensions: dimensionsFor(status, flags, hasStat, hasCite),
+    },
+    emoCount,
+    biasCount,
+  }
+}
 
+// ── Report aggregation (shared by every engine) ─────────────────────────────
+
+function verdictFor(score) {
+  if (score >= 75) return 'High trust. The content demonstrates sound factual integrity with minimal risk.'
+  if (score >= 45) return 'Moderate trust. Some assertions require independent verification.'
+  return 'Low trust. Multiple unverified, biased, or hallucinated claims detected.'
+}
+
+export function buildReport(claims, { emotionalTerms, biasTerms, engine, trustOverride = null, emotionalOverride = null, summary = null }) {
   const total = claims.length
-  const verifiedCount = claims.filter(c => c.status === 'Verified').length
-  const unverifiedCount = claims.filter(c => c.status === 'Unverified').length
-  const flaggedCount = claims.filter(c => c.status === 'Flagged').length
+  const denom = Math.max(total, 1)
+  const count = pred => claims.filter(pred).length
 
-  const factScore = Math.max(0, Math.min(100, Math.round((verifiedCount / Math.max(total, 1)) * 100)))
-  const hallScore = Math.max(0, Math.min(100, 100 - Math.round((hallCount / Math.max(total, 1)) * 100)))
-  const biasScore = Math.max(0, Math.min(100, 100 - Math.round((totalBias / Math.max(total * 2, 1)) * 100)))
-  const emoScore = Math.min(100, Math.round((totalEmo / Math.max(total * 2, 1)) * 100))
-  const statScore = unverifiedStats === 0 ? 100 : Math.max(0, 100 - Math.round((unverifiedStats / Math.max(total, 1)) * 100))
+  const verifiedCount = count(c => c.status === 'Verified')
+  const unverifiedCount = count(c => c.status === 'Unverified')
+  const flaggedCount = count(c => c.status === 'Flagged')
+  const hallCount = count(c => c.flags.includes('hallucination'))
+  const unverifiedStats = count(c => c.flags.includes('unverified_stat'))
+  const debunkedCount = count(c => c.flags.includes('fact_debunked'))
 
-  const avgConf = claims.reduce((s, c) => s + c.confidence, 0) / Math.max(total, 1)
-  const penalty = (flaggedCount * 0.12 + unverifiedCount * 0.05) / Math.max(total, 1)
-  const trustScore = Math.max(5, Math.min(100, Math.round(((avgConf * 0.4) + (factScore * 0.25 / 100) + (hallScore * 0.2 / 100) + (biasScore * 0.15 / 100) - penalty) * 100)))
+  const factScore = total ? round1(clamp((verifiedCount / denom) * 100 - (debunkedCount / denom) * 40, 0, 100)) : 0
+  const hallScore = round1(Math.max(0, 100 - (hallCount / denom) * 100))
+  const biasScore = round1(Math.max(0, 100 - (biasTerms / Math.max(total * 2, 1)) * 100))
+  const emoScore = emotionalOverride != null
+    ? round1(clamp(emotionalOverride, 0, 100))
+    : round1(Math.min((emotionalTerms / Math.max(total * 2, 1)) * 100, 100))
+  const statScore = round1(Math.max(0, 100 - (unverifiedStats / denom) * 100))
 
-  let verdict = 'Moderate trust. Some assertions require independent verification.'
-  if (trustScore >= 75) verdict = 'High trust. The content demonstrates sound factual integrity with minimal risk.'
-  else if (trustScore < 45) verdict = 'Low trust. Multiple unverified, biased, or hallucinated claims detected.'
+  let trust = 0
+  if (trustOverride != null) {
+    trust = round1(clamp(trustOverride, 0, 100))
+  } else if (total) {
+    const avgConf = claims.reduce((s, c) => s + c.confidence, 0) / total
+    const composite = avgConf * 0.4 + (factScore / 100) * 0.25 + (hallScore / 100) * 0.2 + (biasScore / 100) * 0.15
+    const penalty = (flaggedCount * 0.12 + unverifiedCount * 0.05) / total
+    trust = round1(clamp(composite - penalty, 0.05, 1) * 100)
+  }
+
+  const finalSummary = summary || (total
+    ? `${verdictFor(trust)} Analysed ${total} claim(s): ${verifiedCount} verified, ${unverifiedCount} unverified, ${flaggedCount} flagged.`
+    : 'No text provided for analysis. Please enter text to audit.')
 
   return {
-    overall_trust_score: trustScore,
-    summary: `${verdict} Analysed ${total} claim(s): ${verifiedCount} verified, ${unverifiedCount} unverified, ${flaggedCount} flagged.`,
+    overall_trust_score: trust,
+    summary: finalSummary,
     claims,
     metrics: {
       fact_check: {
@@ -213,14 +246,14 @@ export function analyzeLocally(text) {
         risk: hallScore < 40 ? 'Severe' : hallScore < 75 ? 'Caution' : 'Clean',
       },
       bias: {
-        detected: totalBias > 0,
-        count: totalBias,
+        detected: biasTerms > 0,
+        count: biasTerms,
         score: biasScore,
         level: biasScore < 50 ? 'Heavily Biased' : biasScore < 85 ? 'Slightly Slanted' : 'Neutral',
       },
       emotional: {
         score: emoScore,
-        count: totalEmo,
+        count: emotionalTerms,
         intensity: emoScore > 50 ? 'High Manipulation' : emoScore > 20 ? 'Moderate Urgency' : 'Calm / Objective',
       },
       statistics: {
@@ -231,62 +264,190 @@ export function analyzeLocally(text) {
       total_claims: total,
     },
     scores: {
-      trust: trustScore,
+      trust,
       fact_checking: factScore,
       hallucination: hallScore,
       bias: biasScore,
       emotional: emoScore,
       statistics: statScore,
     },
-    engine: {
-      name: 'Client Heuristic Engine',
-      model: 'browser-local',
-      credits_used: false,
-    },
+    engine,
   }
 }
 
-export async function callSarvamDirect(text, apiKey) {
-  if (!apiKey) return null
+export function analyzeLocally(text) {
+  const stripped = text ? text.trim() : ''
+  if (!stripped) return null
 
-  const response = await fetch('https://api.sarvam.ai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      'api-subscription-key': apiKey,
-    },
-    body: JSON.stringify({
-      model: 'sarvam-105b',
-      messages: [
-        {
-          role: 'system',
-          content: 'You are FactShield, an authoritative AI Hallucination & Bias Auditor. Analyze the user\'s text for truthfulness, hallucinations, bias, emotional manipulation, and statistics verification. Respond strictly in valid JSON matching FactShield schema.',
-        },
-        {
-          role: 'user',
-          content: `Audit the following text across all 6 checks:\n\n${text}`,
-        },
-      ],
-      temperature: 0.1,
-    }),
+  let emotionalTerms = 0
+  let biasTerms = 0
+  const claims = splitIntoClaims(stripped).map((c, idx) => {
+    const { claim, emoCount, biasCount } = classifyClaim(c, idx + 1)
+    emotionalTerms += emoCount
+    biasTerms += biasCount
+    return claim
   })
 
-  if (!response.ok) {
-    throw new Error(`Sarvam API Error ${response.status}: ${response.statusText}`)
-  }
+  return buildReport(claims, {
+    emotionalTerms,
+    biasTerms,
+    engine: { name: 'Client Heuristic Engine', model: 'browser-local', credits_used: false },
+  })
+}
 
-  const data = await response.json()
-  let content = data.choices[0].message.content.trim()
-  if (content.startsWith('```')) {
-    content = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-  }
+// ── LLM response normalisation ───────────────────────────────────────────────
 
-  const parsed = JSON.parse(content)
-  parsed.engine = {
-    name: 'Sarvam AI',
-    model: 'sarvam-105b',
-    credits_used: true,
+const toNumber = v => {
+  const n = typeof v === 'number' ? v : parseFloat(v)
+  return Number.isFinite(n) ? n : null
+}
+
+/**
+ * Coerce a loosely-structured LLM audit into the canonical report shape.
+ * Throws if it has no usable claims.
+ */
+export function normalizeLlmReport(raw, engine) {
+  if (!raw || !Array.isArray(raw.claims)) throw new Error('LLM response has no claims list')
+
+  const claims = []
+  for (const item of raw.claims) {
+    if (!item || typeof item !== 'object') continue
+    const text = String(item.claim_text ?? '').trim()
+    if (!text) continue
+
+    const s = String(item.status ?? '').trim()
+    const capitalized = s.charAt(0).toUpperCase() + s.slice(1).toLowerCase()
+    const status = VALID_STATUSES.includes(capitalized) ? capitalized : 'Unverified'
+
+    let confidence = toNumber(item.confidence)
+    if (confidence == null) confidence = 0.5
+    else if (confidence > 1) confidence /= 100
+    confidence = Math.round(clamp(confidence, 0, 1) * 100) / 100
+
+    const flags = [...new Set((Array.isArray(item.flags) ? item.flags : [])
+      .map(f => String(f).trim().toLowerCase())
+      .filter(f => VALID_FLAGS.includes(f)))]
+
+    claims.push({
+      id: claims.length + 1,
+      claim_text: text,
+      status,
+      confidence,
+      reason: String(item.reason || 'Assessed by language model.'),
+      flags,
+      dimensions: dimensionsFor(status, flags),
+    })
   }
-  return parsed
+  if (claims.length === 0) throw new Error('LLM response contained no usable claims')
+
+  const metrics = raw.metrics && typeof raw.metrics === 'object' ? raw.metrics : {}
+  const termCount = (key, flag) => {
+    const reported = toNumber(metrics[key])
+    return reported != null ? Math.max(0, Math.trunc(reported)) : claims.filter(c => c.flags.includes(flag)).length
+  }
+  let trust = toNumber(raw.overall_trust_score)
+  if (trust != null && trust > 0 && trust <= 1) trust *= 100
+
+  return buildReport(claims, {
+    emotionalTerms: termCount('emotional_count', 'emotional'),
+    biasTerms: termCount('bias_count', 'bias'),
+    emotionalOverride: toNumber(metrics.emotional_manipulation_score),
+    trustOverride: trust,
+    summary: raw.summary ? String(raw.summary) : null,
+    engine,
+  })
+}
+
+// ── Direct Sarvam AI call (static hosting only) ──────────────────────────────
+
+const SARVAM_MODEL = 'sarvam-105b'
+
+// Keep in sync with SYSTEM_PROMPT in services/sarvam_client.py
+const SARVAM_SYSTEM_PROMPT = `You are FactShield, an authoritative AI Hallucination & Bias Auditor.
+Analyze the user's text for truthfulness, hallucinations, bias, emotional manipulation, and statistics verification.
+
+You MUST respond ONLY with a single valid JSON object, without markdown formatting or code blocks, strictly adhering to this JSON schema:
+{
+  "overall_trust_score": <float between 0.0 and 100.0>,
+  "summary": "<2-3 sentence executive audit verdict>",
+  "claims": [
+    {
+      "id": <integer starting at 1>,
+      "claim_text": "<exact sentence or assertion>",
+      "status": "<Verified | Unverified | Flagged>",
+      "confidence": <float between 0.0 and 1.0>,
+      "reason": "<clear explanation for this assessment>",
+      "flags": ["<any of: hallucination, bias, emotional, unverified_stat, fact_verified, fact_debunked>"]
+    }
+  ],
+  "metrics": {
+    "fact_check": {
+      "verified_count": <integer>,
+      "debunked_count": <integer>,
+      "neutral_count": <integer>
+    },
+    "hallucination_count": <integer>,
+    "bias_detected": <boolean>,
+    "bias_count": <integer>,
+    "emotional_manipulation_score": <float between 0.0 and 100.0>,
+    "emotional_count": <integer>,
+    "unverified_stats_count": <integer>,
+    "total_claims": <integer>
+  }
+}
+`
+
+function extractJsonObject(content) {
+  let c = content.trim()
+  if (c.startsWith('```')) c = c.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+  try {
+    return JSON.parse(c)
+  } catch {
+    const start = c.indexOf('{')
+    const end = c.lastIndexOf('}')
+    if (start === -1 || end <= start) throw new Error('Sarvam AI reply did not contain JSON')
+    return JSON.parse(c.slice(start, end + 1))
+  }
+}
+
+export async function callSarvamDirect(text, apiKey, { timeoutMs = 45000 } = {}) {
+  if (!apiKey) return null
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch('https://api.sarvam.ai/v1/chat/completions', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'api-subscription-key': apiKey,
+      },
+      body: JSON.stringify({
+        model: SARVAM_MODEL,
+        messages: [
+          { role: 'system', content: SARVAM_SYSTEM_PROMPT },
+          { role: 'user', content: `Audit the following text across all 6 checks:\n\n${text}` },
+        ],
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`Sarvam API Error ${response.status}: ${response.statusText}`)
+    }
+
+    const data = await response.json()
+    const content = data?.choices?.[0]?.message?.content
+    if (typeof content !== 'string') throw new Error('Unexpected Sarvam AI response format')
+
+    return normalizeLlmReport(extractJsonObject(content), {
+      name: 'Sarvam AI',
+      model: data.model || SARVAM_MODEL,
+      credits_used: true,
+    })
+  } finally {
+    clearTimeout(timeoutId)
+  }
 }

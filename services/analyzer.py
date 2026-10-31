@@ -1,14 +1,12 @@
 """
 services/analyzer.py
 
-Core analysis engine for the AI Hallucination & Bias Auditor.
+Core analysis engine for the FactShield AI Auditor.
 Heuristically evaluates text claims for hallucinations, bias,
-emotional manipulation, and unverified statistics.
+emotional manipulation, unverified statistics, and fact-checking signals.
 """
 
 import re
-import math
-
 
 # ---------------------------------------------------------------------------
 # Keyword dictionaries for heuristic analysis
@@ -37,6 +35,12 @@ BIAS_INDICATOR_WORDS = {
     "brainwashed", "naive", "foolish", "ridiculous",
 }
 
+HALLUCINATION_WORDS = {
+    "scientists say", "experts agree", "studies show", "research proves",
+    "it is known", "it is a fact", "undisputed", "universally accepted",
+    "according to science", "doctors confirm", "governments admit",
+}
+
 # Regex patterns
 STAT_PATTERN = re.compile(
     r"""
@@ -56,6 +60,16 @@ CITATION_PATTERN = re.compile(
         university\s+of|journal\s+of|doi:|arxiv:|pubmed:)
     """,
     re.IGNORECASE | re.VERBOSE,
+)
+
+FACT_CHECK_POSITIVE = re.compile(
+    r"\b(?:confirmed|verified|true|correct|accurate|validated|authenticated|established)\b",
+    re.IGNORECASE,
+)
+
+FACT_CHECK_NEGATIVE = re.compile(
+    r"\b(?:false|incorrect|debunked|misleading|inaccurate|disputed|disproven|unfounded)\b",
+    re.IGNORECASE,
 )
 
 
@@ -79,9 +93,16 @@ def _count_bias_words(tokens: set) -> int:
 def _has_absolute_claim(tokens: set, raw: str) -> bool:
     if tokens & ABSOLUTE_CLAIM_WORDS:
         return True
-    # Check multi-word phrases
     raw_lower = raw.lower()
     for phrase in ["without doubt", "everyone knows", "it's obvious", "of course"]:
+        if phrase in raw_lower:
+            return True
+    return False
+
+
+def _has_hallucination_phrase(raw: str) -> bool:
+    raw_lower = raw.lower()
+    for phrase in HALLUCINATION_WORDS:
         if phrase in raw_lower:
             return True
     return False
@@ -95,11 +116,17 @@ def _has_citation(text: str) -> bool:
     return bool(CITATION_PATTERN.search(text))
 
 
+def _fact_check_signal(text: str) -> str:
+    """Return 'positive', 'negative', or 'neutral' based on fact-check language."""
+    if FACT_CHECK_NEGATIVE.search(text):
+        return "negative"
+    if FACT_CHECK_POSITIVE.search(text) or _has_citation(text):
+        return "positive"
+    return "neutral"
+
+
 def _sentence_confidence(claim: str) -> float:
-    """
-    Return a 0.0–1.0 confidence score for an individual claim.
-    Higher = more trustworthy; Lower = more suspicious.
-    """
+    """Return a 0.0–1.0 confidence score for an individual claim."""
     tokens = _tokenize_lower(claim)
     score = 0.75  # neutral baseline
 
@@ -111,20 +138,25 @@ def _sentence_confidence(claim: str) -> float:
     if _count_bias_words(tokens) > 0:
         score -= 0.08 * min(_count_bias_words(tokens), 3)
     if _has_stat(claim) and not _has_citation(claim):
-        score -= 0.20  # stat without citation is suspicious
+        score -= 0.20
+    if _has_hallucination_phrase(claim):
+        score -= 0.15
 
     # Bonuses
     if _has_citation(claim):
         score += 0.20
+    if FACT_CHECK_POSITIVE.search(claim):
+        score += 0.05
     if len(claim.split()) >= 12:
-        score += 0.05  # longer, more detailed claims slightly trusted
+        score += 0.05
 
     return round(max(0.0, min(1.0, score)), 2)
 
 
-def _classify_claim(claim: str, confidence: float) -> tuple[str, str]:
+def _classify_claim(claim: str, confidence: float) -> tuple:
     """
-    Return (status, reason) based on claim content and confidence.
+    Return (status, reason, flags) based on claim content and confidence.
+    flags is a list of detection categories that fired on this claim.
     """
     tokens = _tokenize_lower(claim)
     has_abs = _has_absolute_claim(tokens, claim)
@@ -132,22 +164,46 @@ def _classify_claim(claim: str, confidence: float) -> tuple[str, str]:
     has_cite = _has_citation(claim)
     emo_count = _count_emotional_words(tokens)
     bias_count = _count_bias_words(tokens)
+    has_hallucination = _has_hallucination_phrase(claim)
+    fact_signal = _fact_check_signal(claim)
 
     reasons = []
+    flags = []
 
+    # ── Hallucination check
     if has_abs:
-        reasons.append("Contains absolute language (e.g., 'always', 'never', 'guaranteed').")
+        reasons.append("Contains absolute language that may signal a hallucinated claim.")
+        flags.append("hallucination")
+    if has_hallucination:
+        reasons.append("Uses vague authority references typical of hallucinated content.")
+        if "hallucination" not in flags:
+            flags.append("hallucination")
+
+    # ── Statistics check
     if has_stat and not has_cite:
-        reasons.append("Statistical claim without a verifiable citation.")
-    if emo_count > 0:
-        reasons.append(f"Uses {emo_count} emotionally charged word(s) that may skew perception.")
-    if bias_count > 0:
-        reasons.append(f"Contains {bias_count} potential bias indicator(s).")
-    if has_cite:
-        reasons.append("Includes a source citation — adds credibility.")
+        reasons.append("Statistical claim without a verifiable source citation.")
+        flags.append("unverified_stat")
 
-    # Determine status
-    if has_abs:
+    # ── Emotional manipulation check
+    if emo_count > 0:
+        reasons.append(f"Uses {emo_count} emotionally charged word(s) that may manipulate perception.")
+        flags.append("emotional")
+
+    # ── Bias check
+    if bias_count > 0:
+        reasons.append(f"Contains {bias_count} bias indicator(s) suggesting one-sided framing.")
+        flags.append("bias")
+
+    # ── Fact-check signals
+    if fact_signal == "positive":
+        reasons.append("Includes credible citation or verified language — adds trustworthiness.")
+        flags.append("fact_verified")
+    elif fact_signal == "negative":
+        reasons.append("Contains language indicating a debunked or false claim.")
+        flags.append("fact_debunked")
+
+    # ── Determine overall status
+    if has_abs or has_hallucination or fact_signal == "negative":
         status = "Flagged"
     elif has_stat and not has_cite:
         status = "Unverified"
@@ -159,7 +215,7 @@ def _classify_claim(claim: str, confidence: float) -> tuple[str, str]:
         status = "Flagged"
 
     reason = " ".join(reasons) if reasons else "No major issues detected; accepted as a standard factual statement."
-    return status, reason
+    return status, reason, flags
 
 
 # ---------------------------------------------------------------------------
@@ -168,20 +224,15 @@ def _classify_claim(claim: str, confidence: float) -> tuple[str, str]:
 
 def analyze_text(text: str) -> dict:
     """
-    Analyze input text for hallucinations, bias, and unverified claims.
-
-    Parameters
-    ----------
-    text : str
-        Raw text submitted by the user.
+    Analyze input text for hallucinations, bias, emotional manipulation,
+    unverified statistics, and fact-check signals.
 
     Returns
     -------
     dict
-        Structured audit result containing overall_trust_score, summary,
-        claims list, and metrics.
+        Structured audit result with overall_trust_score, summary,
+        claims list (with per-claim flags), and detailed metrics.
     """
-    # ── Guard: empty input ───────────────────────────────────────────────────
     stripped = text.strip()
     if not stripped:
         return {
@@ -189,9 +240,14 @@ def analyze_text(text: str) -> dict:
             "summary": "No text provided for analysis.",
             "claims": [],
             "metrics": {
+                "fact_check": {"verified_count": 0, "debunked_count": 0, "neutral_count": 0},
+                "hallucination_count": 0,
                 "bias_detected": False,
+                "bias_count": 0,
                 "emotional_manipulation_score": 0.0,
+                "emotional_count": 0,
                 "unverified_stats_count": 0,
+                "total_claims": 0,
             },
         }
 
@@ -205,36 +261,43 @@ def analyze_text(text: str) -> dict:
     total_emotional = 0
     unverified_stats = 0
     bias_word_total = 0
+    hallucination_count = 0
+    fact_verified_count = 0
+    fact_debunked_count = 0
+    fact_neutral_count = 0
 
     for idx, claim_text in enumerate(raw_claims, start=1):
         tokens = _tokenize_lower(claim_text)
         confidence = _sentence_confidence(claim_text)
-        status, reason = _classify_claim(claim_text, confidence)
+        status, reason, flags = _classify_claim(claim_text, confidence)
 
         all_confidences.append(confidence)
         total_emotional += _count_emotional_words(tokens)
         bias_word_total += _count_bias_words(tokens)
 
-        if status == "Unverified" and _has_stat(claim_text):
+        if "hallucination" in flags:
+            hallucination_count += 1
+        if "unverified_stat" in flags:
             unverified_stats += 1
+        if "fact_verified" in flags:
+            fact_verified_count += 1
+        elif "fact_debunked" in flags:
+            fact_debunked_count += 1
+        else:
+            fact_neutral_count += 1
 
-        claims.append(
-            {
-                "id": idx,
-                "claim_text": claim_text,
-                "status": status,
-                "confidence": confidence,
-                "reason": reason,
-            }
-        )
+        claims.append({
+            "id": idx,
+            "claim_text": claim_text,
+            "status": status,
+            "confidence": confidence,
+            "reason": reason,
+            "flags": flags,
+        })
 
     # ── Aggregate metrics ─────────────────────────────────────────────────────
-    if all_confidences:
-        avg_confidence = sum(all_confidences) / len(all_confidences)
-    else:
-        avg_confidence = 0.0
+    avg_confidence = sum(all_confidences) / len(all_confidences) if all_confidences else 0.0
 
-    # Penalise the overall score for flagged claims
     flagged_count = sum(1 for c in claims if c["status"] == "Flagged")
     unverified_count = sum(1 for c in claims if c["status"] == "Unverified")
     total = len(claims)
@@ -244,7 +307,7 @@ def analyze_text(text: str) -> dict:
     overall_trust_score = round(max(0.0, min(1.0, raw_score)) * 100, 1)
 
     # Emotional manipulation score (0–100)
-    emo_max = total * 3  # assume max 3 emotional words per sentence
+    emo_max = total * 3
     emotional_score = round(min(total_emotional / max(emo_max, 1), 1.0) * 100, 1)
 
     bias_detected = bias_word_total > 0
@@ -259,10 +322,11 @@ def analyze_text(text: str) -> dict:
     else:
         verdict = "Very low trust. The text contains significant hallucination or bias indicators."
 
+    verified_count = sum(1 for c in claims if c["status"] == "Verified")
     summary = (
         f"{verdict} "
         f"Analysed {total} claim(s): "
-        f"{sum(1 for c in claims if c['status'] == 'Verified')} verified, "
+        f"{verified_count} verified, "
         f"{unverified_count} unverified, "
         f"{flagged_count} flagged."
     )
@@ -272,8 +336,17 @@ def analyze_text(text: str) -> dict:
         "summary": summary,
         "claims": claims,
         "metrics": {
+            "fact_check": {
+                "verified_count": fact_verified_count,
+                "debunked_count": fact_debunked_count,
+                "neutral_count": fact_neutral_count,
+            },
+            "hallucination_count": hallucination_count,
             "bias_detected": bias_detected,
+            "bias_count": bias_word_total,
             "emotional_manipulation_score": emotional_score,
+            "emotional_count": total_emotional,
             "unverified_stats_count": unverified_stats,
+            "total_claims": total,
         },
     }

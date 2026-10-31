@@ -1,0 +1,111 @@
+/* ============================================================
+   FactShield — Design System
+   Palette: Dark Graphite Titanium + Emerald Trust
+   (Dark only · Not navy blue · Not black · Not brown)
+   ============================================================ */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  /* ── Classy & Trustworthy Accent: Emerald / Mint Security */
+  --accent:         #10b981;          /* emerald-500 */
+  --accent-light:   #34d399;          /* emerald-400 */
+  --accent-dim:     rgba(16, 185, 129, 0.12);
+  --accent-glow:    rgba(16, 185, 129, 0.28);
+  --accent-border:  rgba(16, 185, 129, 0.38);
+
+  /* ── Dark Graphite Slate (Not navy blue, not black, not brown) */
+  --bg:             #14171e;          /* deep cool graphite slate */
+  --bg-surface:     #1a1f28;          /* surface container */
+  --bg-card:        #202632;          /* card background */
+  --bg-card2:       #262e3d;          /* elevated card background */
+  --bg-card-hover:  #2d3647;          /* hover highlight */
+  --bg-input:       #101319;          /* input area background */
+  --bg-glass:       rgba(26, 31, 40, 0.85);
+
+  /* ── Subtle Neutral Borders */
+  --border:         rgba(255, 255, 255, 0.08);
+  --border-mid:     rgba(255, 255, 255, 0.14);
+  --border-focus:   rgba(16, 185, 129, 0.55);
+
+  /* ── Typography & Neutrals */
+  --text:           #f1f5f9;          /* slate-100 */
+  --text-sub:       #94a3b8;          /* slate-400 */
+  --text-dim:       #64748b;          /* slate-500 */
+
+  /* ── Trust & Verification States */
+  --verified:       #10b981;
+  --verified-bg:    rgba(16, 185, 129, 0.12);
+  --verified-border:rgba(16, 185, 129, 0.32);
+
+  --unverified:     #f59e0b;
+  --unverified-bg:  rgba(245, 158, 11, 0.12);
+  --unverified-border: rgba(245, 158, 11, 0.32);
+
+  --flagged:        #f43f5e;
+  --flagged-bg:     rgba(244, 63, 94, 0.12);
+  --flagged-border: rgba(244, 63, 94, 0.32);
+
+  --bias-color:     #a855f7;
+  --bias-bg:        rgba(168, 85, 247, 0.12);
+  --bias-border:    rgba(168, 85, 247, 0.32);
+
+  --stat-color:     #06b6d4;
+  --stat-bg:        rgba(6, 182, 212, 0.12);
+  --stat-border:    rgba(6, 182, 212, 0.32);
+
+  /* ── Fonts */
+  --font: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+
+  /* ── Shadows & Depth */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 8px 24px -4px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 16px 36px -6px rgba(0, 0, 0, 0.55);
+  --glow-trust: 0 0 32px rgba(16, 185, 129, 0.22);
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.6;
+  background-color: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Modern clean scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--bg-card-hover);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
+::selection {
+  background: var(--accent-dim);
+  color: var(--accent-light);
+}

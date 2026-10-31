@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef } from 'react'
 import { analyzeLocally, callSarvamDirect } from './services/localAnalyzer'
 import './App.css'
 
@@ -123,8 +123,38 @@ function ScoreRing({ score, label = 'Score', inverted = false, size = 156 }) {
 
 // ── Claim Row Component ────────────────────────────────────────────────────────
 
-function ClaimRow({ claim, index }) {
+function ClaimRow({ claim, index, activeTab }) {
   const sk = claim.status.toLowerCase()
+  const dim = claim.dimensions || {}
+
+  // Determine dimension-specific badge for the current view
+  let dimBadge = null
+  if (activeTab === 'bias') {
+    dimBadge = dim.bias === 'flagged' || claim.flags?.includes('bias')
+      ? { label: '⚖️ Biased Framing', cls: 'flag-bias' }
+      : { label: '✓ Objective Framing', cls: 'flag-verified' }
+  } else if (activeTab === 'emotional') {
+    dimBadge = dim.emotional === 'flagged' || claim.flags?.includes('emotional')
+      ? { label: '🎭 Emotional Trigger', cls: 'flag-emotional' }
+      : { label: '✓ Calm & Rational', cls: 'flag-verified' }
+  } else if (activeTab === 'hallucination') {
+    dimBadge = dim.hallucination === 'flagged' || claim.flags?.includes('hallucination')
+      ? { label: '🧠 Hallucination / Absolute', cls: 'flag-hallucination' }
+      : { label: '✓ Clean Assertion', cls: 'flag-verified' }
+  } else if (activeTab === 'unverified_stat') {
+    dimBadge = dim.statistics === 'unverified' || claim.flags?.includes('unverified_stat')
+      ? { label: '📊 Unverified Stat', cls: 'flag-stat' }
+      : dim.statistics === 'cited'
+      ? { label: '✓ Verified Citation Data', cls: 'flag-verified' }
+      : { label: '✓ Clean (No Phantom Stats)', cls: 'flag-verified' }
+  } else if (activeTab === 'fact_check') {
+    dimBadge = dim.fact_check === 'debunked' || claim.flags?.includes('fact_debunked')
+      ? { label: '❌ Fact Debunked / False', cls: 'flag-debunked' }
+      : dim.fact_check === 'verified' || claim.flags?.includes('fact_verified')
+      ? { label: '✓ Verified / Documented', cls: 'flag-verified' }
+      : { label: '⚡ Factual Baseline', cls: 'flag-default' }
+  }
+
   return (
     <div
       className={`claim-row ${sk}`}
@@ -147,18 +177,22 @@ function ClaimRow({ claim, index }) {
           <span className="reason-label">Evaluation:</span> {claim.reason}
         </p>
 
-        {claim.flags && claim.flags.length > 0 && (
-          <div className="cflags">
-            {claim.flags.map(f => {
-              const cfg = FLAG_CONFIG[f] || { label: f, cls: 'flag-default' }
-              return (
-                <span key={f} className={`cflag ${cfg.cls}`}>
-                  {cfg.label}
-                </span>
-              )
-            })}
-          </div>
-        )}
+        <div className="cflags">
+          {dimBadge && (
+            <span className={`cflag ${dimBadge.cls}`} title="Dimension check result">
+              {dimBadge.label}
+            </span>
+          )}
+
+          {claim.flags && claim.flags.length > 0 && claim.flags.map(f => {
+            const cfg = FLAG_CONFIG[f] || { label: f, cls: 'flag-default' }
+            return (
+              <span key={f} className={`cflag ${cfg.cls}`}>
+                {cfg.label}
+              </span>
+            )
+          })}
+        </div>
 
         <div className="conf-pill">
           <span>Confidence:</span>
@@ -275,11 +309,23 @@ export default function App() {
       return
     }
 
-    // If no result yet: load sample and run audit
-    setText(feature.sample)
-    setActiveTab(feature.id)
-    setSampleNotice(`Loaded test sample for ${feature.name}. Analyzing...`)
-    executeAnalysis(feature.sample, feature.id)
+    // If user already typed their OWN text: NEVER overwrite it! Audit their text!
+    if (text.trim()) {
+      setActiveTab(feature.id)
+      executeAnalysis(text, feature.id)
+      return
+    }
+
+    // If no text yet: load sample and run audit
+    loadSample(feature.sample, feature.id, feature.name)
+  }
+
+  // ── Load Sample Helper
+  function loadSample(sampleText, featureId, featureName) {
+    setText(sampleText)
+    setActiveTab(featureId)
+    setSampleNotice(`Loaded test sample for ${featureName}. Auditing...`)
+    executeAnalysis(sampleText, featureId)
   }
 
   function clearAll() {
@@ -291,34 +337,43 @@ export default function App() {
     setSampleNotice(null)
   }
 
-  // ── Filter claims based on the active tab
+  // ── Claims and Dimensional Breakdowns
   const allClaims = result?.claims ?? []
-  let tabClaims = allClaims
+
+  // Check specific issues for the selected tab
+  let flaggedInTab = []
+  let tabTitle = 'All Claims Breakdown'
 
   if (activeTab === 'fact_check') {
-    tabClaims = allClaims.filter(c => c.flags?.includes('fact_verified') || c.flags?.includes('fact_debunked') || c.status === 'Verified')
+    tabTitle = 'Fact Checking & Citations'
+    flaggedInTab = allClaims.filter(c => c.flags?.includes('fact_debunked') || c.status === 'Flagged')
   } else if (activeTab === 'hallucination') {
-    tabClaims = allClaims.filter(c => c.flags?.includes('hallucination') || c.status === 'Flagged')
+    tabTitle = 'Hallucinations & Fabrications'
+    flaggedInTab = allClaims.filter(c => c.flags?.includes('hallucination') || c.status === 'Flagged')
   } else if (activeTab === 'bias') {
-    tabClaims = allClaims.filter(c => c.flags?.includes('bias'))
+    tabTitle = 'Biased Framing & Loaded Rhetoric'
+    flaggedInTab = allClaims.filter(c => c.flags?.includes('bias'))
   } else if (activeTab === 'emotional') {
-    tabClaims = allClaims.filter(c => c.flags?.includes('emotional'))
+    tabTitle = 'Emotional Manipulation Triggers'
+    flaggedInTab = allClaims.filter(c => c.flags?.includes('emotional'))
   } else if (activeTab === 'unverified_stat') {
-    tabClaims = allClaims.filter(c => c.flags?.includes('unverified_stat'))
+    tabTitle = 'Statistics Verification'
+    flaggedInTab = allClaims.filter(c => c.flags?.includes('unverified_stat'))
   }
 
+  // Apply Status Filter across allClaims
   const displayedClaims = statusFilter === 'All'
-    ? tabClaims
-    : tabClaims.filter(c => c.status === statusFilter)
+    ? allClaims
+    : allClaims.filter(c => c.status === statusFilter)
 
   // Scores and Metrics
   const scores = result?.scores || {
     trust: result?.overall_trust_score || 0,
-    fact_checking: result?.metrics?.fact_check?.verified_count ? Math.round((result.metrics.fact_check.verified_count / Math.max(allClaims.length, 1)) * 100) : 0,
-    hallucination: Math.max(0, 100 - (result?.metrics?.hallucination?.count || result?.metrics?.hallucination_count || 0) * 30),
-    bias: (result?.metrics?.bias?.detected || result?.metrics?.bias_detected) ? 40 : 100,
+    fact_checking: result?.metrics?.fact_check?.score || (result?.metrics?.fact_check?.verified_count ? Math.round((result.metrics.fact_check.verified_count / Math.max(allClaims.length, 1)) * 100) : 0),
+    hallucination: result?.metrics?.hallucination?.score || Math.max(0, 100 - (result?.metrics?.hallucination?.count || result?.metrics?.hallucination_count || 0) * 30),
+    bias: result?.metrics?.bias?.score || ((result?.metrics?.bias?.detected || result?.metrics?.bias_detected) ? 40 : 100),
     emotional: result?.metrics?.emotional?.score || result?.metrics?.emotional_manipulation_score || 0,
-    statistics: (result?.metrics?.statistics?.unverified_count || result?.metrics?.unverified_stats_count || 0) > 0 ? 30 : 100,
+    statistics: result?.metrics?.statistics?.score || ((result?.metrics?.statistics?.unverified_count || result?.metrics?.unverified_stats_count || 0) > 0 ? 30 : 100),
   }
 
   const m = result?.metrics
@@ -426,14 +481,14 @@ export default function App() {
         </h1>
 
         <p className="hero-desc">
-          Paste text generated by ChatGPT, Gemini, or Claude. FactShield runs six rigorous,
-          independent verification algorithms to deliver deep fact audits and trust metrics.
+          Paste any text generated by ChatGPT, Gemini, Claude, or written by yourself. FactShield executes six rigorous,
+          independent verification algorithms to deliver an actionable Trust Score and granular claim-level breakdown.
         </p>
 
         {/* ── The 6 Interactive Hero Buttons ── */}
         <div className="feature-buttons-wrapper">
           <div className="feature-action-hint">
-            <span>⚡ Interactive Checks — Click any check to view dedicated analysis or test with live AI sample:</span>
+            <span>🛡️ 6-Dimension Verification Suite — Click any check to audit your text or inspect its report:</span>
           </div>
 
           <div className="feature-pills" role="toolbar" aria-label="Audit Features">
@@ -446,7 +501,7 @@ export default function App() {
                   id={`btn-${feat.id}`}
                   className={`fpill ${isSelected ? 'is-selected' : ''}`}
                   onClick={() => handleFeatureButtonClick(feat)}
-                  title={`${feat.desc} (Click to switch to ${feat.name} report)`}
+                  title={`Run audit or view ${feat.name} report`}
                   type="button"
                 >
                   <span className="pill-icon">{feat.icon}</span>
@@ -478,12 +533,31 @@ export default function App() {
           </div>
         )}
 
+        {/* Quick Sample Prompts Bar */}
+        <div className="sample-prompts-bar">
+          <span className="sample-prompts-label">✨ Or test with a sample:</span>
+          <div className="sample-chips">
+            {AUDIT_FEATURES.map(feat => (
+              <button
+                key={feat.id}
+                className="sample-chip"
+                onClick={() => loadSample(feat.sample, feat.id, feat.name)}
+                type="button"
+                title={`Load sample prompt testing ${feat.name}`}
+              >
+                <span>{feat.icon}</span>
+                <span>{feat.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* Input Panel */}
         <div className="input-panel">
           <div className="panel-header">
             <div className="panel-title">
               <span className="bar" />
-              <span>Input AI Text to Audit</span>
+              <span>Input AI Text to Audit (Works for Any Text)</span>
             </div>
             {result?.engine && (
               <span className="engine-badge">
@@ -495,7 +569,7 @@ export default function App() {
           <textarea
             id="text-input"
             className="textarea"
-            placeholder="Paste text generated by ChatGPT, Gemini, or any AI model here, or click any feature button above to load a targeted test case..."
+            placeholder="Paste text generated by ChatGPT, Gemini, Claude, or write your own custom text here to audit..."
             value={text}
             onChange={e => setText(e.target.value)}
             rows={7}
@@ -583,9 +657,9 @@ export default function App() {
                   <div className="view-content">
                     <div className="view-eyebrow-row">
                       <span className="view-eyebrow">Comprehensive AI Credibility Audit</span>
-                      <div className={`verdict-tag ${vd.cls}`}>
-                        <span>{vd.icon}</span>
-                        <span>{vd.label}</span>
+                      <div className={`verdict-tag ${vd?.cls || 'verdict-med'}`}>
+                        <span>{vd?.icon || '🛡️'}</span>
+                        <span>{vd?.label || 'Trust Score'}</span>
                       </div>
                     </div>
                     <p className="summary-paragraph">{result.summary}</p>
@@ -890,16 +964,9 @@ export default function App() {
             <div className="claims-panel" ref={claimsRef}>
               <div className="claims-panel-header">
                 <div className="claims-panel-title">
-                  <h3>
-                    {activeTab === 'trust_score' && 'All Claims Breakdown'}
-                    {activeTab === 'fact_check' && 'Fact-Checked Claims'}
-                    {activeTab === 'hallucination' && 'Hallucination & Fabrication Claims'}
-                    {activeTab === 'bias' && 'Biased & Slanted Statements'}
-                    {activeTab === 'emotional' && 'Emotionally Charged Claims'}
-                    {activeTab === 'unverified_stat' && 'Statistical Claims'}
-                  </h3>
+                  <h3>{tabTitle}</h3>
                   <span className="claims-total-badge">
-                    {displayedClaims.length} of {allClaims.length} claims
+                    {displayedClaims.length} claim(s) analysed
                   </span>
                 </div>
 
@@ -913,12 +980,73 @@ export default function App() {
                     >
                       {status}
                       <span className="tab-count">
-                        {status === 'All' ? tabClaims.length : tabClaims.filter(c => c.status === status).length}
+                        {status === 'All' ? allClaims.length : allClaims.filter(c => c.status === status).length}
                       </span>
                     </button>
                   ))}
                 </div>
               </div>
+
+              {/* ── Dimension Success Banner if zero issues detected in this dimension ── */}
+              {activeTab === 'bias' && (m?.bias?.count || m?.bias_count || 0) === 0 && (
+                <div className="dimension-success-banner">
+                  <span className="dim-banner-icon">✨</span>
+                  <div className="dim-banner-content">
+                    <div className="dim-banner-title">Zero Biased Framing Detected</div>
+                    <p className="dim-banner-desc">
+                      Every statement in your submitted text maintains an objective, neutral tone with no loaded adjectives or one-sided assertions.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === 'emotional' && (scores.emotional <= 10) && (
+                <div className="dimension-success-banner">
+                  <span className="dim-banner-icon">🌿</span>
+                  <div className="dim-banner-content">
+                    <div className="dim-banner-title">Rational &amp; Calm Phrasing</div>
+                    <p className="dim-banner-desc">
+                      No psychological triggers, fear-mongering, or urgency traps detected. Your text delivers information calmly and rationally.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === 'hallucination' && (m?.hallucination?.count || m?.hallucination_count || 0) === 0 && (
+                <div className="dimension-success-banner">
+                  <span className="dim-banner-icon">🧠</span>
+                  <div className="dim-banner-content">
+                    <div className="dim-banner-title">Zero Hallucinations or False Absolutes</div>
+                    <p className="dim-banner-desc">
+                      No extreme certainty language ("always", "never", "guaranteed") or vague authority appeals ("studies prove") were found in your text.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === 'unverified_stat' && (m?.statistics?.unverified_count || m?.unverified_stats_count || 0) === 0 && (
+                <div className="dimension-success-banner">
+                  <span className="dim-banner-icon">📊</span>
+                  <div className="dim-banner-content">
+                    <div className="dim-banner-title">Clean Statistical Integrity</div>
+                    <p className="dim-banner-desc">
+                      No unsupported percentages, fabricated currency figures, or phantom numbers were detected.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === 'fact_check' && (m?.fact_check?.debunked_count || 0) === 0 && (
+                <div className="dimension-success-banner">
+                  <span className="dim-banner-icon">✅</span>
+                  <div className="dim-banner-content">
+                    <div className="dim-banner-title">Sound Factual Delivery</div>
+                    <p className="dim-banner-desc">
+                      No debunked viral myths or falsified claims identified in this submission.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* Claims List View */}
               <div className="claims-list-body" role="list">
@@ -926,19 +1054,19 @@ export default function App() {
                   <div className="empty-claims">
                     <span className="empty-icon">🔎</span>
                     <p className="empty-text">
-                      No claims found for this specific filter.
+                      No claims found matching the '{statusFilter}' status filter.
                     </p>
                     <button
                       className="btn-secondary btn-sm"
-                      onClick={() => { setActiveTab('trust_score'); setStatusFilter('All') }}
+                      onClick={() => setStatusFilter('All')}
                       type="button"
                     >
-                      View All Claims
+                      Show All {allClaims.length} Claims
                     </button>
                   </div>
                 ) : (
                   displayedClaims.map((claim, idx) => (
-                    <ClaimRow key={claim.id} claim={claim} index={idx} />
+                    <ClaimRow key={claim.id} claim={claim} index={idx} activeTab={activeTab} />
                   ))
                 )}
               </div>

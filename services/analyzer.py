@@ -9,63 +9,90 @@ Evaluates submitted text across 6 dimensions:
   4. Emotional Manipulation (detects sensationalist, alarming, or fear-inducing triggers)
   5. Statistics Verification (flags unverified percentages and numbers without citations)
   6. Trust Score (synthesizes a multi-dimensional credibility score from 0 to 100)
+
+Every engine (heuristic or LLM) produces the same canonical report shape via
+``build_report`` so the frontend can rely on a single schema.
+
+NOTE: frontend/src/services/localAnalyzer.js mirrors this engine for static
+hosting (GitHub Pages). Keep the lexicons and patterns in sync.
 """
 
-import sys
-import re
 import logging
-from services.sarvam_client import analyze_with_sarvam, get_sarvam_api_key
+import math
+import re
 
-# Ensure Windows terminal doesn't crash on emoji/Unicode characters
-if sys.platform == "win32":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+from services.sarvam_client import analyze_with_sarvam, get_sarvam_api_key
 
 logger = logging.getLogger("factshield.analyzer")
 
 # ---------------------------------------------------------------------------
-# Dictionaries & Regex Patterns
+# Lexicons
 # ---------------------------------------------------------------------------
 
-ABSOLUTE_CLAIM_WORDS = {
+ABSOLUTE_CLAIM_TERMS = (
     "always", "never", "definitely", "undoubtedly", "proven", "guaranteed",
     "impossible", "unquestionably", "indisputable", "certainly", "100%",
     "unconditionally", "infallible", "undeniable", "absolute", "completely",
-}
+    "without doubt", "everyone knows", "it's obvious", "of course",
+)
 
-HALLUCINATION_WORDS = {
+HALLUCINATION_PHRASES = (
     "experts agree", "everyone knows", "studies show", "research proves",
     "scientists have found", "widely known", "without doubt", "it is obvious",
     "conclusively proven", "unanimously accepted", "it is common knowledge",
-}
+)
 
-EMOTIONAL_TRIGGER_WORDS = {
+EMOTIONAL_TRIGGER_TERMS = (
     "shocking", "devastating", "miracle", "catastrophic", "terrifying",
     "horrific", "unbelievable", "nightmare", "disastrous", "apocalyptic",
     "mind-blowing", "jaw-dropping", "sensational", "panic", "agony",
     "ruin", "destroy", "horrifying", "frightening", "deadly",
-}
+)
 
-BIAS_INDICATOR_WORDS = {
+BIAS_INDICATOR_TERMS = (
     "obviously", "clearly", "naturally", "as expected", "of course",
     "needless to say", "undeniably", "plainly", "predictably", "unquestionably",
     "patently", "morally superior", "corrupt", "malicious", "evil",
-}
+)
 
+
+def _term_pattern(terms) -> re.Pattern:
+    """
+    Compile a case-insensitive matcher for whole words *and* multi-word /
+    hyphenated phrases. Hyphens count as part of a word so that e.g.
+    "mind-blowing" matches as one term but "destroy" does not match "destroy-er".
+    """
+    alternation = "|".join(re.escape(t) for t in sorted(terms, key=len, reverse=True))
+    return re.compile(rf"(?<![\w-])(?:{alternation})(?![\w-])", re.IGNORECASE)
+
+
+ABSOLUTE_PATTERN = _term_pattern(ABSOLUTE_CLAIM_TERMS)
+HALLUCINATION_PATTERN = _term_pattern(HALLUCINATION_PHRASES)
+EMOTIONAL_PATTERN = _term_pattern(EMOTIONAL_TRIGGER_TERMS)
+BIAS_PATTERN = _term_pattern(BIAS_INDICATOR_TERMS)
+
+# Percentages, currency amounts and counted quantities. Deliberately avoids
+# trailing \b after symbols like "%" (a \b between "%" and a space never matches).
 STAT_PATTERN = re.compile(
-    r"\b(?:\d+(?:\.\d+)?%|\$\d+(?:\.\d+)?(?:\s*(?:billion|million|trillion))?|\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:percent|times|fold|people|users|patients|cases))\b",
+    r"(?<![\w.])\d+(?:[.,]\d+)*\s?%"
+    r"|[$€£₹]\s?\d+(?:[.,]\d+)*(?:\s*(?:k|m|bn|billion|million|trillion|crore|lakh)\b)?"
+    r"|\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:percent|per cent|times|fold|people|users|"
+    r"patients|cases|deaths|billion|million|trillion)\b",
     re.IGNORECASE,
 )
 
-CITATION_PATTERN = re.compile(
-    r"\b(?:according to|published in|cited by|reported by|peer-reviewed|journal of|"
-    r"nature|lancet|reuters|who|cdc|nasa|iea|associated press|bbc|nih|world bank|"
-    r"stanford|mit|harvard|oxford|university of|et al\.)\b",
+# Citation phrases and organisation names (case-insensitive).
+_CITATION_PHRASES = re.compile(
+    r"(?<!\w)(?:according to|published in|cited by|reported by|peer-reviewed|journal of|"
+    r"the lancet|lancet|reuters|associated press|world bank|world health organi[sz]ation|"
+    r"international energy agency|centers for disease control|stanford|harvard|oxford|"
+    r"university of|et al\.)(?!\w)",
     re.IGNORECASE,
 )
+
+# Acronyms / proper nouns that collide with ordinary words when lowercased
+# ("who", "nature", "mit"), so they must match case-sensitively.
+_CITATION_ACRONYMS = re.compile(r"\b(?:WHO|CDC|NASA|IEA|BBC|NIH|MIT|Nature)\b")
 
 FACT_CHECK_POSITIVE = re.compile(
     r"\b(?:confirmed|verified|documented|corroborated|authenticated|peer-reviewed|"
@@ -79,40 +106,35 @@ FACT_CHECK_NEGATIVE = re.compile(
     re.IGNORECASE,
 )
 
+VALID_STATUSES = ("Verified", "Unverified", "Flagged")
+VALID_FLAGS = (
+    "hallucination", "bias", "emotional", "unverified_stat", "fact_verified", "fact_debunked",
+)
 
 # ---------------------------------------------------------------------------
-# Helper functions
+# Signal helpers
 # ---------------------------------------------------------------------------
 
-def _tokenize_lower(text: str) -> set:
-    """Return a set of lowercase words from the text (supports alphanumeric and unicode)."""
-    return set(re.findall(r"[\w']+", text.lower()))
+
+def _distinct_matches(pattern: re.Pattern, text: str) -> int:
+    """Number of distinct lexicon terms found in ``text``."""
+    return len({m.lower() for m in pattern.findall(text)})
 
 
-def _count_emotional_words(tokens: set) -> int:
-    return len(tokens & EMOTIONAL_TRIGGER_WORDS)
+def _count_emotional_terms(text: str) -> int:
+    return _distinct_matches(EMOTIONAL_PATTERN, text)
 
 
-def _count_bias_words(tokens: set) -> int:
-    return len(tokens & BIAS_INDICATOR_WORDS)
+def _count_bias_terms(text: str) -> int:
+    return _distinct_matches(BIAS_PATTERN, text)
 
 
-def _has_absolute_claim(tokens: set, raw: str) -> bool:
-    if tokens & ABSOLUTE_CLAIM_WORDS:
-        return True
-    raw_lower = raw.lower()
-    for phrase in ["without doubt", "everyone knows", "it's obvious", "of course"]:
-        if phrase in raw_lower:
-            return True
-    return False
+def _has_absolute_claim(text: str) -> bool:
+    return bool(ABSOLUTE_PATTERN.search(text))
 
 
-def _has_hallucination_phrase(raw: str) -> bool:
-    raw_lower = raw.lower()
-    for phrase in HALLUCINATION_WORDS:
-        if phrase in raw_lower:
-            return True
-    return False
+def _has_hallucination_phrase(text: str) -> bool:
+    return bool(HALLUCINATION_PATTERN.search(text))
 
 
 def _has_stat(text: str) -> bool:
@@ -120,7 +142,7 @@ def _has_stat(text: str) -> bool:
 
 
 def _has_citation(text: str) -> bool:
-    return bool(CITATION_PATTERN.search(text))
+    return bool(_CITATION_PHRASES.search(text) or _CITATION_ACRONYMS.search(text))
 
 
 def _fact_check_signal(text: str) -> str:
@@ -134,25 +156,27 @@ def _fact_check_signal(text: str) -> str:
 
 def _sentence_confidence(claim: str) -> float:
     """Return a 0.0–1.0 confidence score for an individual claim."""
-    tokens = _tokenize_lower(claim)
     score = 0.85  # neutral confident baseline
+    has_cite = _has_citation(claim)
+    emo = _count_emotional_terms(claim)
+    bias = _count_bias_terms(claim)
 
     # Penalties
-    if _has_absolute_claim(tokens, claim):
+    if _has_absolute_claim(claim):
         score -= 0.30
-    if _count_emotional_words(tokens) > 0:
-        score -= 0.10 * min(_count_emotional_words(tokens), 3)
-    if _count_bias_words(tokens) > 0:
-        score -= 0.08 * min(_count_bias_words(tokens), 3)
-    if _has_stat(claim) and not _has_citation(claim):
+    if emo:
+        score -= 0.10 * min(emo, 3)
+    if bias:
+        score -= 0.08 * min(bias, 3)
+    if _has_stat(claim) and not has_cite:
         score -= 0.20
-    if _has_hallucination_phrase(claim) and not _has_citation(claim):
+    if _has_hallucination_phrase(claim) and not has_cite:
         score -= 0.25
     if FACT_CHECK_NEGATIVE.search(claim):
         score -= 0.40
 
     # Boosts
-    if _has_citation(claim):
+    if has_cite:
         score += 0.15
     if FACT_CHECK_POSITIVE.search(claim):
         score += 0.10
@@ -166,29 +190,49 @@ def split_into_claims(text: str) -> list[str]:
     Gracefully handles paragraphs, bullet lists, numbered points, and sentences.
     """
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [l.strip() for l in normalized.split("\n") if l.strip()]
+    lines = [line.strip() for line in normalized.split("\n") if line.strip()]
 
     claims = []
     for line in lines:
         # Strip leading bullet indicators (e.g., "- ", "* ", "1. ", "• ")
-        cleaned = re.sub(r"^[\*\-\•\–\—\>\s]+", "", line)
-        cleaned = re.sub(r"^\d+[\.\)]\s*", "", cleaned).strip()
+        cleaned = re.sub(r"^[*\-•–—>\s]+", "", line)
+        cleaned = re.sub(r"^\d+[.)]\s*", "", cleaned).strip()
         if not cleaned:
             continue
 
         # Split on sentence boundaries if multiple sentences exist within a single line
-        parts = re.split(r"(?<=[.?!…])\s+(?=[A-Z0-9\"'“‘\u0900-\u097F])", cleaned)
-        for part in parts:
-            p = part.strip()
-            if p:
-                claims.append(p)
+        parts = re.split(r"(?<=[.?!…])\s+(?=[A-Z0-9\"'“‘ऄ-ॿ])", cleaned)
+        claims.extend(p.strip() for p in parts if p.strip())
 
-    if not claims:
-        st = text.strip()
-        if st:
-            claims = [st]
+    if not claims and text.strip():
+        claims = [text.strip()]
 
     return claims
+
+
+def _dimensions_for(status: str, flags: list[str], has_stat: bool = False, has_cite: bool = False) -> dict:
+    """Per-claim dimension status used by the UI report tabs."""
+    if "fact_debunked" in flags:
+        fact = "debunked"
+    elif "fact_verified" in flags or status == "Verified":
+        fact = "verified"
+    else:
+        fact = "unverified"
+
+    if "unverified_stat" in flags:
+        stats = "unverified"
+    elif has_stat and has_cite:
+        stats = "cited"
+    else:
+        stats = "clean"
+
+    return {
+        "fact_check": fact,
+        "hallucination": "flagged" if ("hallucination" in flags or status == "Flagged") else "clean",
+        "bias": "flagged" if "bias" in flags else "clean",
+        "emotional": "flagged" if "emotional" in flags else "clean",
+        "statistics": stats,
+    }
 
 
 def _classify_claim(claim: str, confidence: float) -> tuple[str, str, list[str], dict]:
@@ -196,16 +240,15 @@ def _classify_claim(claim: str, confidence: float) -> tuple[str, str, list[str],
     Classify a claim and return (status, reason, flags, dimensions).
     Guarantees consistent mapping between status and dimensional flags.
     """
-    tokens = _tokenize_lower(claim)
     reasons = []
     flags = []
 
-    has_abs = _has_absolute_claim(tokens, claim)
-    has_hallucination = _has_hallucination_phrase(claim) and not _has_citation(claim)
-    has_stat = _has_stat(claim)
     has_cite = _has_citation(claim)
-    emo_count = _count_emotional_words(tokens)
-    bias_count = _count_bias_words(tokens)
+    has_abs = _has_absolute_claim(claim)
+    has_hallucination = _has_hallucination_phrase(claim) and not has_cite
+    has_stat = _has_stat(claim)
+    emo_count = _count_emotional_terms(claim)
+    bias_count = _count_bias_terms(claim)
     fact_signal = _fact_check_signal(claim)
 
     # 1. Hallucination checks
@@ -223,234 +266,119 @@ def _classify_claim(claim: str, confidence: float) -> tuple[str, str, list[str],
         flags.append("unverified_stat")
 
     # 3. Emotional manipulation check
-    if emo_count > 0:
+    if emo_count:
         reasons.append(f"Uses {emo_count} emotionally charged or sensationalist trigger word(s).")
         flags.append("emotional")
 
     # 4. Bias check
-    if bias_count > 0:
+    if bias_count:
         reasons.append(f"Contains {bias_count} bias indicator(s) suggesting one-sided framing.")
         flags.append("bias")
 
-    # 5. Fact check check
+    # 5. Fact check
     if fact_signal == "negative":
         reasons.append("Contains language identifying a debunked, disproven, or false assertion.")
         flags.append("fact_debunked")
-    elif has_cite or fact_signal == "positive":
+    elif fact_signal == "positive":
         reasons.append("Includes verified source citation or documented evidence.")
         flags.append("fact_verified")
 
-    # 6. Overall Status Determination
+    # 6. Overall status
     if has_abs or has_hallucination or fact_signal == "negative" or confidence < 0.45:
         status = "Flagged"
         if not flags:
             flags.append("hallucination")
-    elif (has_stat and not has_cite) or (0.45 <= confidence < 0.75):
+    elif (has_stat and not has_cite) or confidence < 0.75:
         status = "Unverified"
     else:
         status = "Verified"
         if "fact_verified" not in flags:
             flags.append("fact_verified")
 
-    # Dimensions status mapping for granular UI tabs
-    dimensions = {
-        "fact_check": "debunked" if fact_signal == "negative" else "verified" if (has_cite or fact_signal == "positive" or status == "Verified") else "unverified",
-        "hallucination": "flagged" if ("hallucination" in flags or status == "Flagged") else "clean",
-        "bias": "flagged" if "bias" in flags else "clean",
-        "emotional": "flagged" if "emotional" in flags else "clean",
-        "statistics": "unverified" if "unverified_stat" in flags else "cited" if (has_stat and has_cite) else "clean",
-    }
-
     reason = " ".join(reasons) if reasons else "Logical assertion supported by standard factual tone."
-    return status, reason, flags, dimensions
+    return status, reason, flags, _dimensions_for(status, flags, has_stat, has_cite)
 
 
 # ---------------------------------------------------------------------------
-# Fallback generator for zero-failure resilience
+# Report aggregation (shared by every engine)
 # ---------------------------------------------------------------------------
 
-def analyze_text_fallback(text: str) -> dict:
-    """Safe fallback analysis ensuring the server never raises 500 error."""
-    stripped = text.strip() if text else ""
-    claim_text = stripped if stripped else "No text provided."
-    return {
-        "overall_trust_score": 85.0 if stripped else 0.0,
-        "summary": "Audit completed using resilient fallback engine." if stripped else "No text provided for analysis.",
-        "claims": [{
-            "id": 1,
-            "claim_text": claim_text,
-            "status": "Verified" if stripped else "Unverified",
-            "confidence": 0.85 if stripped else 0.0,
-            "reason": "Standard assertion processed under resilient mode.",
-            "flags": ["fact_verified"] if stripped else [],
-            "dimensions": {
-                "fact_check": "verified" if stripped else "unverified",
-                "hallucination": "clean",
-                "bias": "clean",
-                "emotional": "clean",
-                "statistics": "clean",
-            }
-        }] if stripped else [],
-        "metrics": {
-            "fact_check": {"verified_count": 1 if stripped else 0, "debunked_count": 0, "neutral_count": 0, "score": 85.0 if stripped else 0.0},
-            "hallucination": {"count": 0, "score": 100.0, "risk": "Clean"},
-            "bias": {"detected": False, "count": 0, "score": 100.0, "level": "Neutral"},
-            "emotional": {"score": 0.0, "count": 0, "intensity": "Calm / Objective"},
-            "statistics": {"unverified_count": 0, "score": 100.0, "status": "All Cited"},
-            "total_claims": 1 if stripped else 0,
-        },
-        "scores": {
-            "trust": 85.0 if stripped else 0.0,
-            "fact_checking": 85.0 if stripped else 0.0,
-            "hallucination": 100.0,
-            "bias": 100.0,
-            "emotional": 0.0,
-            "statistics": 100.0,
-        },
-        "engine": {"name": "Resilient Heuristic Engine", "model": "local", "credits_used": False},
-    }
+
+def _verdict(score: float) -> str:
+    if score >= 75:
+        return "High trust. The content demonstrates sound factual integrity with minimal risk."
+    if score >= 45:
+        return "Moderate trust. Some assertions require independent verification."
+    return "Low trust. Multiple unverified, biased, or hallucinated claims detected."
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def analyze_text(text: str, sarvam_api_key: str = None) -> dict:
-    """
-    Analyze input text across all 6 FactShield dimensions.
-    Guaranteed to work for every text given.
-    """
-    stripped = text.strip() if text else ""
-    if not stripped:
-        return {
-            "overall_trust_score": 0.0,
-            "summary": "No text provided for analysis. Please enter text to audit.",
-            "claims": [],
-            "metrics": {
-                "fact_check": {"verified_count": 0, "debunked_count": 0, "neutral_count": 0, "score": 0.0},
-                "hallucination": {"count": 0, "score": 100.0, "risk": "Clean"},
-                "bias": {"detected": False, "count": 0, "score": 100.0, "level": "Neutral"},
-                "emotional": {"score": 0.0, "count": 0, "intensity": "Calm / Objective"},
-                "statistics": {"unverified_count": 0, "score": 100.0, "status": "All Cited"},
-                "total_claims": 0,
-            },
-            "scores": {
-                "trust": 0.0,
-                "fact_checking": 0.0,
-                "hallucination": 100.0,
-                "bias": 100.0,
-                "emotional": 0.0,
-                "statistics": 100.0,
-            },
-            "engine": {"name": "Heuristic Engine", "model": "local", "credits_used": False},
-        }
-
-    # ── Attempt Sarvam AI LLM Analysis if Key is Available ──────────────────
-    active_key = get_sarvam_api_key(sarvam_api_key)
-    if active_key:
-        try:
-            sarvam_result = analyze_with_sarvam(stripped, active_key)
-            if sarvam_result and isinstance(sarvam_result, dict) and "overall_trust_score" in sarvam_result:
-                # Ensure scores block exists for multi-button navigation
-                if "scores" not in sarvam_result:
-                    m = sarvam_result.get("metrics", {})
-                    tot = max(len(sarvam_result.get("claims", [])), 1)
-                    sarvam_result["scores"] = {
-                        "trust": float(sarvam_result.get("overall_trust_score", 75.0)),
-                        "fact_checking": round(min(100.0, (m.get("fact_check", {}).get("verified_count", 0) / tot) * 100), 1),
-                        "hallucination": round(max(0.0, 100 - (m.get("hallucination_count", 0) / tot) * 100), 1),
-                        "bias": round(max(0.0, 100 - (m.get("bias_count", 0) / tot) * 50), 1),
-                        "emotional": float(m.get("emotional_manipulation_score", 0.0)),
-                        "statistics": round(max(0.0, 100 - (m.get("unverified_stats_count", 0) / tot) * 100), 1),
-                    }
-                return sarvam_result
-        except Exception as exc:
-            logger.warning(f"Sarvam AI API failed: {exc}. Falling back to heuristic engine.")
-
-    # ── Built-in Heuristic Analysis ─────────────────────────────────────────
-    raw_claims = split_into_claims(stripped)
-    if not raw_claims:
-        raw_claims = [stripped]
-
-    claims = []
-    all_confidences = []
-    total_emotional = 0
-    bias_word_total = 0
-    hallucination_count = 0
-    unverified_stats = 0
-    debunked_count = 0
-
-    for idx, claim_text in enumerate(raw_claims, start=1):
-        tokens = _tokenize_lower(claim_text)
-        confidence = _sentence_confidence(claim_text)
-        status, reason, flags, dimensions = _classify_claim(claim_text, confidence)
-
-        all_confidences.append(confidence)
-        total_emotional += _count_emotional_words(tokens)
-        bias_word_total += _count_bias_words(tokens)
-
-        if "hallucination" in flags:
-            hallucination_count += 1
-        if "unverified_stat" in flags:
-            unverified_stats += 1
-        if "fact_debunked" in flags:
-            debunked_count += 1
-
-        claims.append({
-            "id": idx,
-            "claim_text": claim_text,
-            "status": status,
-            "confidence": confidence,
-            "reason": reason,
-            "flags": flags,
-            "dimensions": dimensions,
-        })
-
+def build_report(
+    claims: list[dict],
+    *,
+    emotional_terms: int,
+    bias_terms: int,
+    engine: dict,
+    trust_override: float | None = None,
+    emotional_override: float | None = None,
+    summary: str | None = None,
+) -> dict:
+    """Aggregate per-claim results into the canonical FactShield report."""
     total = len(claims)
+    denom = max(total, 1)
+
     verified_count = sum(1 for c in claims if c["status"] == "Verified")
     unverified_count = sum(1 for c in claims if c["status"] == "Unverified")
     flagged_count = sum(1 for c in claims if c["status"] == "Flagged")
+    hallucination_count = sum(1 for c in claims if "hallucination" in c["flags"])
+    unverified_stats = sum(1 for c in claims if "unverified_stat" in c["flags"])
+    debunked_count = sum(1 for c in claims if "fact_debunked" in c["flags"])
 
-    # ── Calculate Multi-Dimensional Scores ──────────────────────────────────
-    # 1. Fact Checking Score (0 - 100)
-    fact_score = round(max(0.0, min(100.0, (verified_count / max(total, 1)) * 100)), 1)
-    if debunked_count > 0:
-        fact_score = round(max(0.0, fact_score - (debunked_count / total) * 40), 1)
+    # 1. Fact checking (0-100, higher is better)
+    fact_score = (verified_count / denom) * 100 - (debunked_count / denom) * 40
+    fact_score = round(max(0.0, min(100.0, fact_score)), 1) if total else 0.0
 
-    # 2. Hallucination Cleanliness Score (100 = completely clean, 0 = severe hallucination)
-    hallucination_score = round(max(0.0, 100.0 - (hallucination_count / max(total, 1)) * 100), 1)
+    # 2. Hallucination cleanliness (100 = clean)
+    hallucination_score = round(max(0.0, 100.0 - (hallucination_count / denom) * 100), 1)
 
-    # 3. Bias Neutrality Score (100 = completely neutral, 0 = severe bias)
-    bias_score = round(max(0.0, 100.0 - (bias_word_total / max(total * 2, 1)) * 100), 1)
+    # 3. Bias neutrality (100 = neutral)
+    bias_score = round(max(0.0, 100.0 - (bias_terms / max(total * 2, 1)) * 100), 1)
 
-    # 4. Emotional Manipulation Score (0 = calm/objective, 100 = high manipulation)
-    emotional_score = round(min((total_emotional / max(total * 2, 1)) * 100, 100.0), 1)
-
-    # 5. Statistics Reliability Score (100 = all cited, 0 = unverified stats)
-    stat_score = 100.0 if unverified_stats == 0 else round(max(0.0, 100.0 - (unverified_stats / max(total, 1)) * 100), 1)
-
-    # 6. Overall Trust Score (Harmonized Composite)
-    avg_conf = (sum(all_confidences) / len(all_confidences)) if all_confidences else 0.5
-    composite = (avg_conf * 0.40) + ((fact_score / 100) * 0.25) + ((hallucination_score / 100) * 0.20) + ((bias_score / 100) * 0.15)
-    penalty = (flagged_count * 0.12 + unverified_count * 0.05) / max(total, 1)
-    raw_trust = max(0.05, min(1.0, composite - penalty))
-    overall_trust_score = round(raw_trust * 100, 1)
-
-    # ── Build Verdict and Summary ───────────────────────────────────────────
-    if overall_trust_score >= 75:
-        verdict = "High trust. The content demonstrates sound factual integrity with minimal risk."
-    elif overall_trust_score >= 45:
-        verdict = "Moderate trust. Some assertions require independent verification."
+    # 4. Emotional manipulation (0 = calm, 100 = heavy manipulation)
+    if emotional_override is not None:
+        emotional_score = round(max(0.0, min(100.0, emotional_override)), 1)
     else:
-        verdict = "Low trust. Multiple unverified, biased, or hallucinated claims detected."
+        emotional_score = round(min((emotional_terms / max(total * 2, 1)) * 100, 100.0), 1)
 
-    summary = (
-        f"{verdict} Analysed {total} claim(s): "
-        f"{verified_count} verified, {unverified_count} unverified, {flagged_count} flagged."
-    )
+    # 5. Statistics reliability (100 = all cited)
+    stat_score = round(max(0.0, 100.0 - (unverified_stats / denom) * 100), 1)
+
+    # 6. Overall trust (composite)
+    if trust_override is not None:
+        trust = round(max(0.0, min(100.0, trust_override)), 1)
+    elif total:
+        avg_conf = sum(c["confidence"] for c in claims) / total
+        composite = (
+            avg_conf * 0.40
+            + (fact_score / 100) * 0.25
+            + (hallucination_score / 100) * 0.20
+            + (bias_score / 100) * 0.15
+        )
+        penalty = (flagged_count * 0.12 + unverified_count * 0.05) / total
+        trust = round(max(0.05, min(1.0, composite - penalty)) * 100, 1)
+    else:
+        trust = 0.0
+
+    if summary is None:
+        if total:
+            summary = (
+                f"{_verdict(trust)} Analysed {total} claim(s): "
+                f"{verified_count} verified, {unverified_count} unverified, {flagged_count} flagged."
+            )
+        else:
+            summary = "No text provided for analysis. Please enter text to audit."
 
     return {
-        "overall_trust_score": overall_trust_score,
+        "overall_trust_score": trust,
         "summary": summary,
         "claims": claims,
         "metrics": {
@@ -466,15 +394,19 @@ def analyze_text(text: str, sarvam_api_key: str = None) -> dict:
                 "risk": "Severe" if hallucination_score < 40 else "Caution" if hallucination_score < 75 else "Clean",
             },
             "bias": {
-                "detected": bias_word_total > 0,
-                "count": bias_word_total,
+                "detected": bias_terms > 0,
+                "count": bias_terms,
                 "score": bias_score,
                 "level": "Heavily Biased" if bias_score < 50 else "Slightly Slanted" if bias_score < 85 else "Neutral",
             },
             "emotional": {
                 "score": emotional_score,
-                "count": total_emotional,
-                "intensity": "High Manipulation" if emotional_score > 50 else "Moderate Urgency" if emotional_score > 20 else "Calm / Objective",
+                "count": emotional_terms,
+                "intensity": (
+                    "High Manipulation" if emotional_score > 50
+                    else "Moderate Urgency" if emotional_score > 20
+                    else "Calm / Objective"
+                ),
             },
             "statistics": {
                 "unverified_count": unverified_stats,
@@ -484,16 +416,166 @@ def analyze_text(text: str, sarvam_api_key: str = None) -> dict:
             "total_claims": total,
         },
         "scores": {
-            "trust": overall_trust_score,
+            "trust": trust,
             "fact_checking": fact_score,
             "hallucination": hallucination_score,
             "bias": bias_score,
             "emotional": emotional_score,
             "statistics": stat_score,
         },
-        "engine": {
-            "name": "Heuristic Engine",
-            "model": "local",
-            "credits_used": False,
-        },
+        "engine": engine,
     }
+
+
+# ---------------------------------------------------------------------------
+# LLM response normalisation
+# ---------------------------------------------------------------------------
+
+
+def _as_float(value) -> float | None:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _as_count(value) -> int | None:
+    f = _as_float(value)
+    return max(0, int(f)) if f is not None else None
+
+
+def normalize_llm_report(raw: dict, engine: dict) -> dict:
+    """
+    Coerce an LLM-produced audit (which follows a looser, flatter schema and may
+    contain out-of-range or missing values) into the canonical report shape.
+    Raises ValueError if it contains no usable claims.
+    """
+    raw_claims = raw.get("claims")
+    if not isinstance(raw_claims, list):
+        raise ValueError("LLM response has no 'claims' list")
+
+    claims = []
+    for item in raw_claims:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("claim_text") or "").strip()
+        if not text:
+            continue
+
+        status = str(item.get("status") or "").strip().capitalize()
+        if status not in VALID_STATUSES:
+            status = "Unverified"
+
+        confidence = _as_float(item.get("confidence"))
+        if confidence is None:
+            confidence = 0.5
+        elif confidence > 1:  # model answered in percent
+            confidence /= 100
+        confidence = round(max(0.0, min(1.0, confidence)), 2)
+
+        raw_flags = item.get("flags") if isinstance(item.get("flags"), list) else []
+        flags = []
+        for f in raw_flags:
+            f = str(f).strip().lower()
+            if f in VALID_FLAGS and f not in flags:
+                flags.append(f)
+
+        claims.append({
+            "id": len(claims) + 1,
+            "claim_text": text,
+            "status": status,
+            "confidence": confidence,
+            "reason": str(item.get("reason") or "Assessed by language model."),
+            "flags": flags,
+            "dimensions": _dimensions_for(status, flags),
+        })
+
+    if not claims:
+        raise ValueError("LLM response contained no usable claims")
+
+    metrics = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
+
+    def term_count(key: str, flag: str) -> int:
+        reported = _as_count(metrics.get(key))
+        return reported if reported is not None else sum(1 for c in claims if flag in c["flags"])
+
+    trust = _as_float(raw.get("overall_trust_score"))
+    if trust is not None and 0 < trust <= 1:  # model answered as a fraction
+        trust *= 100
+
+    summary = raw.get("summary")
+    return build_report(
+        claims,
+        emotional_terms=term_count("emotional_count", "emotional"),
+        bias_terms=term_count("bias_count", "bias"),
+        emotional_override=_as_float(metrics.get("emotional_manipulation_score")),
+        trust_override=trust,
+        summary=str(summary) if summary else None,
+        engine=engine,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+HEURISTIC_ENGINE = {"name": "Heuristic Engine", "model": "local", "credits_used": False}
+
+
+def analyze_heuristic(text: str) -> dict:
+    """Run the built-in, dependency-free heuristic engine."""
+    stripped = text.strip() if text else ""
+    claims = []
+    emotional_terms = 0
+    bias_terms = 0
+
+    for idx, claim_text in enumerate(split_into_claims(stripped), start=1):
+        confidence = _sentence_confidence(claim_text)
+        status, reason, flags, dimensions = _classify_claim(claim_text, confidence)
+        emotional_terms += _count_emotional_terms(claim_text)
+        bias_terms += _count_bias_terms(claim_text)
+        claims.append({
+            "id": idx,
+            "claim_text": claim_text,
+            "status": status,
+            "confidence": confidence,
+            "reason": reason,
+            "flags": flags,
+            "dimensions": dimensions,
+        })
+
+    return build_report(
+        claims,
+        emotional_terms=emotional_terms,
+        bias_terms=bias_terms,
+        engine=dict(HEURISTIC_ENGINE),
+    )
+
+
+def analyze_text(text: str, sarvam_api_key: str | None = None) -> dict:
+    """
+    Analyze input text across all 6 FactShield dimensions.
+
+    Uses Sarvam AI when an API key is supplied (request or environment) and
+    falls back to the heuristic engine if the LLM call fails or returns an
+    unusable response.
+    """
+    stripped = text.strip() if text else ""
+    if not stripped:
+        return analyze_heuristic("")
+
+    active_key = get_sarvam_api_key(sarvam_api_key)
+    if active_key:
+        try:
+            raw, engine = analyze_with_sarvam(stripped, active_key)
+            return normalize_llm_report(raw, engine)
+        except Exception as exc:  # network, HTTP, JSON or schema errors
+            logger.warning("Sarvam AI analysis failed (%s); falling back to heuristic engine.", exc)
+            report = analyze_heuristic(stripped)
+            report["engine"]["notice"] = (
+                "Sarvam AI request failed, so this report was produced by the built-in heuristic engine."
+            )
+            return report
+
+    return analyze_heuristic(stripped)
